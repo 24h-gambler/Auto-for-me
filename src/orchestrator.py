@@ -1,15 +1,14 @@
 """
-Claude-powered tool-using orchestrator.
+Claude-powered tool-using orchestrator with propose-then-confirm UX.
 
-Free-form text from the user → Claude decides which job to launch:
-  - book_ktx(origin, destination, date, time, window_minutes)
-  - recommend_coupang(query, constraints)
-  - get_status() / cancel_job(job_id)
-
-The orchestrator is the *brain*. The tools are the *hands*.
-
-The actual work happens in `JobManager` (see end of file): a long-running
-asyncio task that polls KTX or scrapes Coupang and reports back via Telegram.
+Flow
+----
+1. User: free-form Korean message.
+2. Claude extracts intent + parameters.
+   - If anything ambiguous → asks one short clarifying question.
+   - Otherwise → outputs a proposal (출발/도착/날짜 ... 좌석 우선순위 ...) and waits.
+3. User: 예/네/응/go/시작/응 그래/etc.
+4. Claude calls `book_ktx` / `recommend_coupang` tool.
 """
 
 from __future__ import annotations
@@ -28,46 +27,76 @@ from .utils.log import get_logger
 log = get_logger(__name__)
 
 
-# --- Tool definitions exposed to Claude ------------------------------------
-
 ORCHESTRATOR_SYSTEM = """\
-당신은 한국어 사용자를 위한 자동화 에이전트의 의사결정자입니다. 사용자의 자연어 요청을
-다음 작업 중 하나로 변환하세요. 추측하지 말고, 정보가 부족하면 짧게 한 번 되묻습니다.
+당신은 KTX 예매와 쿠팡 상품 추천을 무한 반복으로 수행하는 한국어 자동화 에이전트의
+의사결정자입니다. 사람에게 부탁하듯 자연스러운 대화를 유지하세요.
 
-가용 작업:
-1. KTX(코레일) 예매: 출발지/도착지/날짜/시간/허용 시간 폭이 필요합니다.
-   매진이라도 사용자가 취소할 때까지 무한 폴링합니다.
-2. 쿠팡 상품 추천: 사용자의 요구(가격대, 용도, 선호 브랜드 등)에 맞는 상품을 검색하고
-   리뷰 신뢰도(가짜 의심 키워드 제외)와 최신성(최근 90일 가중치)을 평가하여 Top 3 추천.
-3. 상태/취소: 진행 중인 작업 조회 및 취소.
+# 절대 규칙: 제안 → 확인 → 실행
+도구(book_ktx / recommend_coupang)를 호출하기 전에 **반드시** 다음 순서를 지킵니다.
 
-규칙:
-- 본 시스템은 본인 1건 예매에만 사용됩니다. 대량/재판매 의심 요청은 거절하세요.
-- 캡차가 발생하면 사용자에게 텔레그램으로 입력을 요청합니다 (자동 우회 금지).
+1. 정보가 부족하면 한 번에 하나만 짧게 묻습니다 (예: "출발역이 서울 맞나요?").
+2. 정보가 모이면 도구를 부르지 말고 **제안 메시지**를 한국어로 출력합니다.
+   포맷:
+       📋 이렇게 진행할까요?
+         · ...
+         · ...
+       👉 답: 예 / 아니오 / 수정사항
+3. 사용자가 긍정(예/네/응/그래/시작/go/ㅇㅇ 등)으로 응답한 직후에만 도구를 호출합니다.
+4. 부정/수정 응답이 오면 파라미터를 갱신해서 다시 1~3을 반복합니다.
+
+# KTX 기본값 (사용자가 명시하지 않으면 이렇게 제안)
+- 좌석 전략: 일반실 우선 → 매진 시 특실을 8분 임시 확보(자동 결제 X) 후 알림
+  (코레일은 좌석 확보 후 약 10분 결제 유예가 있습니다.)
+- 일반실 좌석: A 또는 D 열(창가) 우선
+- 시간 폭: 사용자가 안 주면 ±120분
+- 폴링: 매진 풀릴 때까지 무한, 사용자가 /cancel 또는 "취소" 라고 말할 때까지
+
+# 쿠팡 기본값
+- 식품(수박, 회, 사시미, 고기, 과일, 야채 등) 키워드 감지 시:
+    · 최근 14일 리뷰만 가중치 1.0, 그 이상은 급격히 감점
+    · 신선도/맛/당도/품질 관련 키워드를 평가에 반영
+- 그 외 일반 상품은 최근 90일 가중치 + 사용 목적 적합도 평가.
+- 검색 결과 상위 모든 상품의 최신 리뷰를 점검 후 Top 3 추천.
+
+# 안전
+- 본 시스템은 본인 1건 예매 한정. 대량/재판매 의심 요청은 거절.
+- 캡차는 자동 우회 금지, 사용자에게 텔레그램으로 입력 요청.
 - 답변은 짧고 한국어로.
 """
 
 TOOLS: list[dict[str, Any]] = [
     {
         "name": "book_ktx",
-        "description": "코레일 KTX/SRT 예매 작업을 큐에 등록합니다. 매진이면 취소할 때까지 폴링합니다.",
+        "description": "코레일 KTX/SRT 예매 작업을 큐에 등록합니다. 사용자 확인 직후에만 호출하세요.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "origin": {"type": "string", "description": "출발역 (예: 서울)"},
-                "destination": {"type": "string", "description": "도착역 (예: 부산)"},
+                "origin": {"type": "string"},
+                "destination": {"type": "string"},
                 "date": {"type": "string", "description": "YYYY-MM-DD"},
                 "time": {"type": "string", "description": "HH:MM (24h)"},
-                "window_minutes": {
-                    "type": "integer",
-                    "description": "지정 시간 ±N 분 내의 모든 열차를 후보로 둠",
-                    "default": 120,
+                "window_minutes": {"type": "integer", "default": 120},
+                "train_types": {"type": "array", "items": {"type": "string"}, "default": []},
+                "seat_class_strategy": {
+                    "type": "string",
+                    "enum": [
+                        "standard_first_then_first_class_hold",
+                        "standard_only",
+                        "first_class_only",
+                    ],
+                    "default": "standard_first_then_first_class_hold",
+                    "description": "기본은 일반실 우선, 매진 시 특실 임시 확보(8분).",
                 },
-                "train_types": {
+                "preferred_columns": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "예: ['KTX','KTX-산천']. 비우면 전 열차종.",
-                    "default": [],
+                    "default": ["A", "D"],
+                    "description": "일반실 좌석 열 선호도 (창가 A/D 우선).",
+                },
+                "first_class_hold_minutes": {
+                    "type": "integer",
+                    "default": 8,
+                    "description": "특실 임시 확보 후 사용자 응답 대기 시간(분).",
                 },
             },
             "required": ["origin", "destination", "date", "time"],
@@ -75,40 +104,39 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "recommend_coupang",
-        "description": "쿠팡에서 검색→리뷰 분석→Top 3 추천까지 수행합니다.",
+        "description": "쿠팡에서 검색→최신 리뷰 분석→Top 3 추천을 수행합니다. 사용자 확인 직후에만.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "검색 쿼리 (예: '무선 마우스')"},
-                "max_price_krw": {"type": "integer", "description": "원화 상한", "default": 0},
-                "must_include": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "default": [],
-                    "description": "상품 제목/설명에 반드시 포함",
-                },
-                "must_exclude": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "default": [],
-                },
-                "intent": {
+                "query": {"type": "string"},
+                "max_price_krw": {"type": "integer", "default": 0},
+                "must_include": {"type": "array", "items": {"type": "string"}, "default": []},
+                "must_exclude": {"type": "array", "items": {"type": "string"}, "default": []},
+                "intent": {"type": "string", "default": ""},
+                "category_hint": {
                     "type": "string",
-                    "description": "사용 목적 (예: '사무용', '게임용'). 리뷰 적합도 평가에 사용",
-                    "default": "",
+                    "enum": ["food_fresh", "food_general", "general"],
+                    "default": "general",
+                    "description": "수박/회/사시미/고기/과일 등 신선식품이면 food_fresh.",
                 },
+                "review_window_days": {
+                    "type": "integer",
+                    "default": 90,
+                    "description": "이 기간 내 리뷰만 가중치 만점. food_fresh 는 14일 권장.",
+                },
+                "top_n": {"type": "integer", "default": 3},
             },
             "required": ["query"],
         },
     },
     {
         "name": "list_jobs",
-        "description": "현재 진행/완료/실패 작업 목록을 조회합니다.",
+        "description": "현재 진행/완료/실패 작업 목록.",
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
         "name": "cancel_job",
-        "description": "진행 중인 작업을 취소합니다.",
+        "description": "진행 중 작업 취소.",
         "input_schema": {
             "type": "object",
             "properties": {"job_id": {"type": "string"}},
@@ -126,17 +154,17 @@ JobStatus = str  # "queued" | "running" | "done" | "failed" | "cancelled"
 @dataclass
 class Job:
     id: str
-    kind: str       # "ktx" | "coupang"
+    kind: str
     params: dict[str, Any]
     status: JobStatus = "queued"
     created_at: datetime = field(default_factory=datetime.utcnow)
     result: Any = None
     error: str = ""
     cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
+    user_decision: asyncio.Queue = field(default_factory=asyncio.Queue)
     task: Optional[asyncio.Task] = None
 
 
-# Notifier signature: async def(text, *, photo_path=None, chat_id=None)
 Notifier = Callable[..., Awaitable[None]]
 
 
@@ -145,15 +173,13 @@ class JobManager:
         self.jobs: dict[str, Job] = {}
         self.notify = notify
 
-    # ---- Public API used by the Telegram handler ------------------------
     def submit(self, kind: str, params: dict[str, Any]) -> Job:
-        from .ktx.booker import run_ktx_job  # local import to avoid cycles
+        from .ktx.booker import run_ktx_job
         from .coupang.ranker import run_coupang_job
 
         jid = uuid.uuid4().hex[:8]
         job = Job(id=jid, kind=kind, params=params)
         self.jobs[jid] = job
-
         runner = run_ktx_job if kind == "ktx" else run_coupang_job
         job.task = asyncio.create_task(self._wrap(job, runner))
         log.info("job.submitted", id=jid, kind=kind, params=params)
@@ -172,13 +198,17 @@ class JobManager:
         job.status = "cancelled"
         return True
 
-    # ---- Wrapper that runs the job and updates state --------------------
+    def latest_running(self) -> Optional[Job]:
+        for j in self.list():
+            if j.status == "running":
+                return j
+        return None
+
     async def _wrap(self, job: Job, runner):
         job.status = "running"
         try:
             job.result = await runner(job, self.notify)
             job.status = "done"
-            await self.notify(f"✅ [{job.id}] {job.kind} 완료")
         except asyncio.CancelledError:
             job.status = "cancelled"
             await self.notify(f"⏹️ [{job.id}] 취소됨")
@@ -193,15 +223,24 @@ class JobManager:
 # --- Conversation loop -----------------------------------------------------
 
 class Orchestrator:
-    """Multi-turn Claude conversation that decides what to do."""
+    """Stateful Claude conversation per user."""
 
     def __init__(self, manager: JobManager):
         self.manager = manager
         self.history: list[dict[str, Any]] = []
 
     async def handle(self, user_text: str) -> str:
+        # Quick path: if a running job is awaiting a user decision (e.g. 특실
+        # 임시확보 중), forward 예/아니오 directly without round-tripping LLM.
+        running = self.manager.latest_running()
+        if running is not None:
+            decision = self._parse_decision(user_text)
+            if decision is not None:
+                await running.user_decision.put(decision)
+                return f"✓ [{running.id}] '{decision}' 전달."
+
         self.history.append({"role": "user", "content": user_text})
-        for _ in range(6):  # safety cap on tool-use turns
+        for _ in range(6):
             resp = await chat(
                 system=ORCHESTRATOR_SYSTEM,
                 messages=self.history,
@@ -211,11 +250,9 @@ class Orchestrator:
             self.history.append({"role": "assistant", "content": resp.content})
 
             if resp.stop_reason != "tool_use":
-                # final text answer
                 texts = [b.text for b in resp.content if getattr(b, "type", "") == "text"]
                 return "\n".join(texts).strip() or "(빈 응답)"
 
-            # Execute every tool call requested in this turn.
             tool_results = []
             for block in resp.content:
                 if getattr(block, "type", "") != "tool_use":
@@ -232,11 +269,20 @@ class Orchestrator:
 
         return "복잡한 요청입니다. 더 명확하게 알려주세요."
 
+    @staticmethod
+    def _parse_decision(text: str) -> Optional[str]:
+        t = text.strip().lower()
+        if t in ("예", "네", "응", "ㅇㅇ", "yes", "y", "go", "시작", "확정", "결제"):
+            return "confirm"
+        if t in ("아니오", "아니", "ㄴㄴ", "no", "n", "취소", "release", "릴리즈", "포기"):
+            return "release"
+        return None
+
     async def _dispatch(self, name: str, args: dict[str, Any]) -> Any:
         log.info("tool.dispatch", name=name, args=args)
         if name == "book_ktx":
             job = self.manager.submit("ktx", args)
-            return {"job_id": job.id, "status": job.status}
+            return {"job_id": job.id, "status": job.status, "note": "진행 상황은 텔레그램으로 알림이 갑니다."}
         if name == "recommend_coupang":
             job = self.manager.submit("coupang", args)
             return {"job_id": job.id, "status": job.status}

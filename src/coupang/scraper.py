@@ -109,41 +109,77 @@ def _parse_date(s: str) -> datetime | None:
     return datetime(y, mo, d)
 
 
-async def fetch_reviews(product_url: str, *, max_reviews: int | None = None) -> list[dict[str, Any]]:
+async def fetch_reviews(
+    product_url: str,
+    *,
+    max_reviews: int | None = None,
+    cutoff_date: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Fetch reviews sorted by newest first.
+
+    If `cutoff_date` is given, stop pagination as soon as we see a review older
+    than the cutoff (since reviews are sorted newest-first, no point continuing).
+    """
     max_reviews = max_reviews or CFG.coupang.scraping.max_reviews_per_product
     page = await POOL.new_page()
     reviews: list[dict[str, Any]] = []
     try:
         await page.goto(product_url, wait_until="domcontentloaded")
         await human_pause()
-        # Scroll to the reviews section a few times.
+        # Scroll down so the review section is rendered.
         for _ in range(4):
             await human_scroll(page, 1200, chunks=6)
             await _polite_delay()
 
-        for _ in range(8):  # paginate through "더보기"
+        # Switch sort to "최신순". Coupang exposes this as a select or a tab.
+        try:
+            await page.select_option("select.sdp-review__article-order", label="최신순")
+            await _polite_delay()
+        except Exception:
+            try:
+                tab = page.locator("button:has-text('최신순'), a:has-text('최신순')")
+                if await tab.count():
+                    await tab.first.click()
+                    await _polite_delay()
+            except Exception:
+                pass  # may already be newest-first
+
+        for _ in range(12):
             html = await page.content()
             tree = HTMLParser(html)
+            page_had_old = False
             for art in tree.css("article.sdp-review__article-list, .sdp-review__article"):
                 txt_el = art.css_first(".sdp-review__article-list__review__content, .review-content")
                 star_el = art.css_first(".sdp-review__article-list__info__star-orange, .review-rating em")
-                date_el = art.css_first(".sdp-review__article-list__info__product-info__reg-date, .review-date")
+                date_el = art.css_first(
+                    ".sdp-review__article-list__info__product-info__reg-date, .review-date"
+                )
                 txt = txt_el.text(strip=True) if txt_el else ""
                 if not txt:
                     continue
                 star = 0
                 if star_el:
                     try:
-                        star = int(re.sub(r"[^\d]", "", star_el.attributes.get("data-rating") or star_el.text() or "0"))
+                        raw = star_el.attributes.get("data-rating") or star_el.text() or "0"
+                        star = int(re.sub(r"[^\d]", "", raw))
                     except Exception:
                         star = 0
                 date = _parse_date(date_el.text() if date_el else "")
+                if cutoff_date and date and date < cutoff_date:
+                    page_had_old = True
+                    continue
                 reviews.append({"text": txt, "rating": star, "date": date})
                 if len(reviews) >= max_reviews:
                     return reviews
 
-            # Try clicking the "다음" button. If absent, stop.
-            nxt = page.locator(".sdp-review__article-list-paging button.btn-next, button[aria-label='Next']")
+            if page_had_old and cutoff_date:
+                # Sorted newest-first: once we see older-than-cutoff, we can stop.
+                break
+
+            nxt = page.locator(
+                ".sdp-review__article-list-paging button.btn-next, button[aria-label='Next']"
+            )
             if not await nxt.count():
                 break
             try:

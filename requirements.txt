@@ -1,0 +1,20 @@
+# --- Core ---
+anthropic>=0.39.0          # Claude API (claude-opus-4-7 / claude-sonnet-4-6)
+pydantic>=2.7
+pydantic-settings>=2.3
+python-dotenv>=1.0
+PyYAML>=6.0
+
+# --- Browser automation (stealth) ---
+playwright>=1.47
+playwright-stealth>=1.0.6
+
+# --- Parsing ---
+selectolax>=0.3
+
+# --- Telegram interface ---
+python-telegram-bot[job-queue]>=21.6
+
+# --- Logging ---
+structlog>=24.1
+rich>=13.7

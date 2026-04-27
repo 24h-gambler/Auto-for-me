@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Env / secrets
+.env
+.env.local
+config.yaml
+*.session
+state/
+storage/
+cookies.json
+*.har
+
+# Logs
+logs/
+*.log
+
+# Playwright
+.cache/
+playwright-report/
+test-results/
+node_modules/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Data
+data/
+*.sqlite
+*.db

@@ -1,0 +1,42 @@
+# 사용자 선호 / 기본값. 실제 사용 시 config.yaml 로 복사 후 수정.
+
+ktx:
+  passenger:
+    adult: 1
+    child: 0
+    senior: 0
+  seat_preference:
+    - "특실"
+    - "일반실"     # 우선순위 순서대로 시도
+  car_preference:
+    - "정방향"
+    - "역방향"
+  auto_pay: false   # true로 두면 좌석 잡히는 즉시 간편결제 시도. false면 텔레그램 확인 후 진행.
+  poll:
+    base_interval_sec: 8       # 매진 폴링 기본 주기
+    jitter_sec: 5              # 0~jitter 만큼 랜덤 가산 (인간성 유지)
+    max_interval_sec: 90       # 백오프 상한
+    max_total_hours: 48        # 너무 오래 도는 것 방지
+
+coupang:
+  ranking:
+    min_review_count: 50
+    min_avg_rating: 4.2
+    recent_review_window_days: 90    # '최신' 의견 가중치
+    recent_weight: 0.6               # 최근 리뷰 가중치 (0~1)
+    require_text_reviews: true       # 별점만 있는 리뷰는 제외
+    blacklist_keywords:              # 가짜/광고 의심 키워드
+      - "체험단"
+      - "무상으로 제공"
+      - "리뷰 이벤트 당첨"
+  scraping:
+    max_products_per_query: 20
+    max_reviews_per_product: 80
+    request_delay_sec: 2.0           # 요청 간 최소 간격 (인간성)
+    request_jitter_sec: 1.5
+
+humanize:
+  min_action_delay_ms: 250
+  max_action_delay_ms: 1400
+  type_delay_ms: [60, 180]
+  scroll_jitter: true

@@ -1,0 +1,52 @@
+name: KTX seat watcher
+
+# Cron is in UTC. Korea = UTC+9. The schedule below runs every 10 min during
+# 06:00–24:00 KST (i.e. 21:00 UTC prev day → 15:00 UTC) — adjust as you like.
+# Free tier: 2000 min/month for private repos, unlimited for public.
+on:
+  schedule:
+    - cron: "*/10 21-23 * * *"   # 06:00–08:50 KST
+    - cron: "*/10 0-14 * * *"    # 09:00–23:50 KST
+  workflow_dispatch: {}          # allow manual trigger from GitHub UI
+
+concurrency:
+  group: ktx-watcher
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-watcher-${{ hashFiles('requirements.txt') }}
+
+      - name: Install minimal deps
+        run: |
+          pip install playwright httpx
+          python -m playwright install --with-deps chromium
+
+      - name: Run watcher
+        env:
+          KORAIL_ID: ${{ secrets.KORAIL_ID }}
+          KORAIL_PW: ${{ secrets.KORAIL_PW }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: python scripts/watch_ktx.py
+
+      - name: Persist alert cooldown state
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: watcher-state
+          path: .watcher_state.json
+          if-no-files-found: ignore
+          retention-days: 7

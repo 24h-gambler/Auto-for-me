@@ -1,8 +1,35 @@
 # 운영 가이드 — 어디서 돌릴 것인가?
 
-이 봇은 텔레그램 long-poll 방식이라 **항상 켜진 채로** 명령을 기다려야 합니다. 그래서 "텔레그램 메시지 → Codespace 자동 시작" 같은 wake-on-demand 모델은 잘 안 맞습니다 (콜드 스타트 ~30초 + 30분 무활동 종료 + 60h/월 한도).
+## 권장: PC 켜져 있을 때만 돌리기 (3-Tier 하이브리드)
 
-아래는 실제로 잘 굴러가는 옵션들과, 그래도 Codespaces 를 쓰고 싶을 때의 우회법입니다.
+서버를 24/7 돌리지 않고도 사실상 손실 없이 운영할 수 있습니다.
+
+```
+[Tier 1] 사용자 PC (켜져있을 때만)        — Telegram 봇, Playwright, 실제 예매·쿠팡 분석
+[Tier 2] GitHub Actions cron (무료)       — PC 꺼져있을 때 KTX 좌석만 감시 (예매 X)
+[Tier 3] Telegram 자체가 메시지 큐         — PC 꺼진 동안 명령은 누적, PC 켜지면 처리
+```
+
+이걸 가능하게 하는 코드 측 장치:
+- `state/state.db` (SQLite) 에 작업 영속 → PC 재부팅에도 진행 중인 KTX 폴링 자동 재개
+- `watch_list.json` 에 감시 대상 동기화 → GitHub Actions 워커가 5~10분마다 검사
+- 좌석 발견 시 텔레그램 알림 → PC 켜져있다면 봇이 즉시 결제 단계까지, 꺼져있다면 사용자가 PC 켜기
+
+### PC-only 워크플로 (실전)
+
+1. **봇을 OS 부팅 시 자동 실행**되게 등록 (아래 Autostart 섹션).
+2. PC 를 평소처럼 사용. 끄고 켜고 자유.
+3. KTX 예매가 필요하면 자유 채팅으로 부탁: "이번 주말 부산 KTX 잡아줘 토 9시쯤".
+4. 폴링이 길어질 것 같으면 **/watch** 로 클라우드 감시 등록 후 `git push`. PC 꺼도 GitHub Actions 가 좌석 풀림을 감시.
+5. 좌석 발견 알림이 오면 PC 를 켜기만 하면 됨 — 봇이 부팅 시 자동 시작 → SQLite 에서 작업 재개 → 그동안 누적된 텔레그램 명령 처리.
+
+---
+
+## 그래도 24/7 서버에서 돌리고 싶다면
+
+이 봇은 텔레그램 long-poll 방식이라 항상 켜져 있어야 명령을 받습니다. 그래서 "텔레그램 → Codespace wake" 같은 모델은 잘 안 맞습니다 (콜드 스타트 ~30초 + 30분 무활동 종료 + 60h/월 한도).
+
+아래는 잘 굴러가는 24/7 옵션들과, 굳이 Codespaces 를 쓰고 싶을 때의 우회법입니다.
 
 ---
 
@@ -175,6 +202,61 @@ export default {
 
 ---
 
+---
+
+## Autostart — OS 켜질 때 봇이 알아서 시작
+
+PC-only 모드의 핵심. 봇이 부팅 시 떠 있어야 SQLite 에 저장된 KTX 작업을 자동 재개합니다.
+
+### macOS
+```bash
+bash scripts/autostart/install-macos.sh
+```
+LaunchAgent 가 등록되며, 로그인 시마다 자동 시작 + crash 복구.
+
+### Linux (Ubuntu/Debian/RPi)
+```bash
+bash scripts/autostart/install-linux.sh
+```
+systemd user service 로 등록. `sudo loginctl enable-linger $USER` 까지 해두면 부팅 직후(로그인 전에도) 시작됩니다.
+
+### Windows
+```powershell
+PowerShell -ExecutionPolicy Bypass -File scripts\autostart\install-windows.ps1
+```
+Task Scheduler 에 `AutoForMe` 작업 등록 — 로그온 시 자동 실행, 무한 재시도.
+
+> 로그는 `state/logs/{stdout,stderr}.log` 또는 `journalctl --user -u auto-for-me`.
+
+---
+
+## 클라우드 KTX 워처 (PC 꺼져있을 때 좌석 감시)
+
+### 1) GitHub repo secrets 등록
+GitHub 레포 → **Settings → Secrets and variables → Actions** 에서:
+- `KORAIL_ID`
+- `KORAIL_PW`
+- `TELEGRAM_BOT_TOKEN`
+
+### 2) /watch 로 감시 등록
+텔레그램에서:
+```
+/watch 서울 부산 2026-05-10 09:00 120
+```
+이러면 봇이 `watch_list.json` 을 업데이트합니다. 그 파일을 git 에 push:
+```bash
+git add watch_list.json && git commit -m "watch" && git push
+```
+
+### 3) 자동 작동
+`.github/workflows/ktx-watcher.yml` 이 KST 06–24시 매 10분마다 실행 → 좌석 발견 시 텔레그램으로 알림.
+
+| 비용 | public repo: 무제한 무료 / private repo: 2000분/월 (한 번에 1분 이내라 충분) |
+| 한계 | 캡차가 떴을 때 자동 우회 불가 — 1회 알림 후 다음 회차 대기 |
+| 알림 쿨다운 | 같은 감시 대상에 30분에 1번만 알림 (스팸 방지). 워크플로 artifact 에 저장됨 |
+
+---
+
 ## 셋업 체크리스트
 
 - [ ] `.env` 채움 (Anthropic, Telegram, Korail)
@@ -182,8 +264,9 @@ export default {
 - [ ] **letskorail.com 에 결제용 카드 미리 등록** (간편결제) — 봇이 카드정보 다루지 않게 하기 위해
 - [ ] `config.yaml` 에서 좌석 우선순위 / 폴링 주기 검토
 - [ ] `python -m src.main` 으로 한 번 띄워서 텔레그램에 `/start` 응답 오는지 확인
-- [ ] 안정적인 운영처에 systemd 또는 Docker 로 데몬화
-- [ ] (선택) `state/` 디렉토리를 어딘가에 백업 — 쿠키/세션 영속
+- [ ] **Autostart 스크립트 실행** (macOS/Linux/Windows 중 OS 에 맞게)
+- [ ] **GitHub repo secrets 등록** (KORAIL_ID/PW, TELEGRAM_BOT_TOKEN) — 클라우드 워처용
+- [ ] (선택) `state/profile/` 디렉토리 백업 — 쿠키/세션 영속
 
 ## 자주 나는 문제
 

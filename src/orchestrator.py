@@ -22,6 +22,7 @@ from typing import Any, Awaitable, Callable, Optional
 
 from .ai.claude import chat
 from .config import CFG, ENV
+from . import state
 from .utils.log import get_logger
 
 log = get_logger(__name__)
@@ -172,18 +173,36 @@ class JobManager:
     def __init__(self, notify: Notifier):
         self.jobs: dict[str, Job] = {}
         self.notify = notify
+        self._chat_ids: dict[str, int] = {}     # job_id -> chat_id
 
-    def submit(self, kind: str, params: dict[str, Any]) -> Job:
+    def submit(self, kind: str, params: dict[str, Any], *, chat_id: int | None = None,
+               resume_id: str | None = None) -> Job:
         from .ktx.booker import run_ktx_job
         from .coupang.ranker import run_coupang_job
 
-        jid = uuid.uuid4().hex[:8]
+        jid = resume_id or uuid.uuid4().hex[:8]
         job = Job(id=jid, kind=kind, params=params)
         self.jobs[jid] = job
+        if chat_id is not None:
+            self._chat_ids[jid] = chat_id
+        state.save_job(job, chat_id)
         runner = run_ktx_job if kind == "ktx" else run_coupang_job
         job.task = asyncio.create_task(self._wrap(job, runner))
-        log.info("job.submitted", id=jid, kind=kind, params=params)
+        log.info("job.submitted", id=jid, kind=kind, params=params, resumed=bool(resume_id))
         return job
+
+    async def resume_pending(self) -> int:
+        """Re-submit jobs that were queued/running before the last shutdown."""
+        rows = state.load_resumable_jobs()
+        for r in rows:
+            if r["kind"] not in ("ktx", "coupang"):
+                continue
+            self.submit(r["kind"], r["params"], chat_id=r.get("chat_id"), resume_id=r["id"])
+            await self.notify(
+                f"♻️ [{r['id']}] {r['kind']} 작업을 이어서 진행합니다.",
+                chat_id=r.get("chat_id"),
+            )
+        return len(rows)
 
     def list(self) -> list[Job]:
         return sorted(self.jobs.values(), key=lambda j: j.created_at, reverse=True)
@@ -205,19 +224,27 @@ class JobManager:
         return None
 
     async def _wrap(self, job: Job, runner):
+        chat_id = self._chat_ids.get(job.id)
         job.status = "running"
+        state.save_job(job, chat_id)
+
+        async def _notify_with_default(text, *, photo_path=None, chat_id=chat_id):
+            await self.notify(text, photo_path=photo_path, chat_id=chat_id)
+
         try:
-            job.result = await runner(job, self.notify)
+            job.result = await runner(job, _notify_with_default)
             job.status = "done"
         except asyncio.CancelledError:
             job.status = "cancelled"
-            await self.notify(f"⏹️ [{job.id}] 취소됨")
+            await _notify_with_default(f"⏹️ [{job.id}] 취소됨")
             raise
         except Exception as exc:  # noqa: BLE001
             job.status = "failed"
             job.error = str(exc)
             log.exception("job.failed", id=job.id)
-            await self.notify(f"❌ [{job.id}] 실패: {exc}")
+            await _notify_with_default(f"❌ [{job.id}] 실패: {exc}")
+        finally:
+            state.save_job(job, chat_id)
 
 
 # --- Conversation loop -----------------------------------------------------
@@ -228,8 +255,10 @@ class Orchestrator:
     def __init__(self, manager: JobManager):
         self.manager = manager
         self.history: list[dict[str, Any]] = []
+        self._current_chat_id: Optional[int] = None
 
-    async def handle(self, user_text: str) -> str:
+    async def handle(self, user_text: str, *, chat_id: int | None = None) -> str:
+        self._current_chat_id = chat_id
         # Quick path: if a running job is awaiting a user decision (e.g. 특실
         # 임시확보 중), forward 예/아니오 directly without round-tripping LLM.
         running = self.manager.latest_running()
@@ -281,10 +310,10 @@ class Orchestrator:
     async def _dispatch(self, name: str, args: dict[str, Any]) -> Any:
         log.info("tool.dispatch", name=name, args=args)
         if name == "book_ktx":
-            job = self.manager.submit("ktx", args)
+            job = self.manager.submit("ktx", args, chat_id=self._current_chat_id)
             return {"job_id": job.id, "status": job.status, "note": "진행 상황은 텔레그램으로 알림이 갑니다."}
         if name == "recommend_coupang":
-            job = self.manager.submit("coupang", args)
+            job = self.manager.submit("coupang", args, chat_id=self._current_chat_id)
             return {"job_id": job.id, "status": job.status}
         if name == "list_jobs":
             return [

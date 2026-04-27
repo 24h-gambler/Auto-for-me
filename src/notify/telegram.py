@@ -29,6 +29,7 @@ from telegram.ext import (
 
 from ..config import ENV
 from ..orchestrator import JobManager, Orchestrator
+from .. import state
 from ..utils.log import get_logger
 
 log = get_logger(__name__)
@@ -59,6 +60,9 @@ class TelegramService:
         self.app.add_handler(CommandHandler("captcha", self.cmd_captcha))
         self.app.add_handler(CommandHandler("ktx", self.cmd_ktx))
         self.app.add_handler(CommandHandler("coupang", self.cmd_coupang))
+        self.app.add_handler(CommandHandler("watch", self.cmd_watch))
+        self.app.add_handler(CommandHandler("unwatch", self.cmd_unwatch))
+        self.app.add_handler(CommandHandler("watches", self.cmd_watches))
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_text))
 
     # ---- Notifier (used by orchestrator/booker/ranker) ------------------
@@ -171,11 +175,62 @@ class TelegramService:
         self._default_chat_id = chat.id
         text = update.message.text or ""
         try:
-            reply = await self.orch.handle(text)
+            reply = await self.orch.handle(text, chat_id=chat.id)
         except Exception as exc:  # noqa: BLE001
             log.exception("orch.failed")
             reply = f"오류: {exc}"
         await update.message.reply_text(reply)
+
+    # ---- Watch list (cloud cron uses this) ------------------------------
+    async def cmd_watch(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        if not _is_authorized(update.effective_chat.id):
+            return
+        a = ctx.args
+        if len(a) < 4:
+            await update.message.reply_text(
+                "사용법: /watch 서울 부산 2026-05-10 09:00 [window=120]\n"
+                "PC 가 꺼져있어도 GitHub Actions 가 5~10분마다 좌석을 감시합니다."
+            )
+            return
+        wid = f"w-{int(__import__('time').time())}"
+        query = {
+            "origin": a[0],
+            "destination": a[1],
+            "date": a[2],
+            "time": a[3],
+            "window_minutes": int(a[4]) if len(a) > 4 else 120,
+        }
+        state.add_watch(wid, query, update.effective_chat.id)
+        await update.message.reply_text(
+            f"👀 [{wid}] 감시 시작\n"
+            f"{query['origin']}→{query['destination']} {query['date']} {query['time']} ±{query['window_minutes']}분\n"
+            "좌석이 감지되면 텔레그램으로 알림이 옵니다.\n"
+            "끝나면 `/unwatch {wid}` 로 중지하세요."
+        )
+
+    async def cmd_unwatch(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        if not _is_authorized(update.effective_chat.id):
+            return
+        if not ctx.args:
+            await update.message.reply_text("사용법: /unwatch <id>")
+            return
+        ok = state.remove_watch(ctx.args[0])
+        await update.message.reply_text("중지됨." if ok else "해당 id 없음.")
+
+    async def cmd_watches(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        if not _is_authorized(update.effective_chat.id):
+            return
+        ws = state.list_watches()
+        if not ws:
+            await update.message.reply_text("감시 중 없음.")
+            return
+        lines = []
+        for w in ws:
+            q = w["query"]
+            lines.append(
+                f"[{w['id']}] {q['origin']}→{q['destination']} {q['date']} {q['time']} ±{q['window_minutes']}m"
+            )
+        await update.message.reply_text("\n".join(lines))
 
     # ---- Lifecycle -------------------------------------------------------
     async def run(self) -> None:

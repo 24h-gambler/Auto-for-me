@@ -3,9 +3,12 @@ Entry point.
 
   python -m src.main
 
-Starts the persistent stealth browser, then runs the Telegram bot forever.
-The Telegram bot exposes the Claude-powered orchestrator and the job manager;
-each job (KTX booking, Coupang ranking) runs concurrently in asyncio tasks.
+Lifecycle:
+  1. init SQLite (jobs + watches tables)
+  2. start the persistent stealth Chromium
+  3. start the Telegram service
+  4. resume any jobs that were 'queued' / 'running' at last shutdown
+  5. block forever, gracefully stop on SIGINT / SIGTERM
 """
 
 from __future__ import annotations
@@ -13,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import signal
 
+from . import state
 from .browser.stealth import POOL
 from .notify.telegram import TelegramService
 from .utils.log import get_logger, setup_logging
@@ -22,7 +26,9 @@ async def amain() -> None:
     setup_logging("INFO")
     log = get_logger(__name__)
 
+    state.init_db()
     await POOL.start()
+
     svc = TelegramService()
 
     stop = asyncio.Event()
@@ -39,6 +45,12 @@ async def amain() -> None:
             pass  # windows
 
     runner = asyncio.create_task(svc.run())
+
+    # Resume jobs that didn't finish before last shutdown.
+    n = await svc.manager.resume_pending()
+    if n:
+        log.info("resumed.jobs", count=n)
+
     await stop.wait()
     runner.cancel()
     await POOL.stop()

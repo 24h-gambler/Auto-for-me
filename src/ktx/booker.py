@@ -53,16 +53,51 @@ async def _capture_screenshot(page: Page, label: str) -> Path:
     return p
 
 
+# ---------------------------------------------------------------------------
+# Popup dismissal — Korail shows event/notice popups that intercept clicks.
+# ---------------------------------------------------------------------------
+
+POPUP_CLOSE_SELECTORS = (
+    "a:has-text('오늘 하루 보지 않기'), "
+    "a:has-text('오늘 하루 안보기'), "
+    "a:has-text('닫기'), button:has-text('닫기'), "
+    ".popup_close, .btn_close, .layer_close, "
+    "[aria-label='close'], [aria-label='닫기'], "
+    "img[alt='닫기'], img[alt='close']"
+)
+
+
+async def dismiss_popups(page: Page) -> int:
+    """Close any blocking popups/layers. Returns number closed. Best-effort."""
+    closed = 0
+    for _ in range(6):  # popups can be nested
+        try:
+            loc = page.locator(POPUP_CLOSE_SELECTORS).first
+            if not await loc.count():
+                break
+            try:
+                await loc.click(timeout=1500)
+                closed += 1
+                await asyncio.sleep(0.2)
+            except Exception:
+                break
+        except Exception:
+            break
+    return closed
+
+
 async def ensure_logged_in(page: Page, *, notify=None) -> None:
     await page.goto(S.HOME_URL, wait_until="domcontentloaded")
     await human_pause()
-    if await page.locator("a:has-text('로그아웃')").count():
+    await dismiss_popups(page)
+    if await page.locator("a:has-text('로그아웃'), a[href*='logout']").count():
         return
 
     if not (ENV.korail_id and ENV.korail_pw):
         raise RuntimeError("KORAIL_ID / KORAIL_PW 가 .env 에 없습니다.")
 
     await page.goto(S.LOGIN_URL, wait_until="domcontentloaded")
+    await dismiss_popups(page)
     await human_type(page, S.ID_INPUT, ENV.korail_id)
     await human_type(page, S.PW_INPUT, ENV.korail_pw)
 
@@ -83,9 +118,13 @@ async def ensure_logged_in(page: Page, *, notify=None) -> None:
 
     await human_click(page, S.LOGIN_BTN)
     try:
-        await page.wait_for_selector("a:has-text('로그아웃')", timeout=15000)
+        await page.wait_for_selector(
+            "a:has-text('로그아웃'), a[href*='logout']",
+            timeout=15000,
+        )
     except Exception as exc:
         raise CaptchaRequired("로그인 실패 (자격증명/캡차 오류 가능).") from exc
+    await dismiss_popups(page)
 
 
 # ---------------------------------------------------------------------------
@@ -97,30 +136,57 @@ async def search_trains(
 ) -> list[dict[str, Any]]:
     await page.goto(S.SEARCH_URL, wait_until="domcontentloaded")
     await human_pause()
+    await dismiss_popups(page)
     await human_type(page, S.DEPT_INPUT, origin)
     await human_type(page, S.ARRV_INPUT, destination)
-    # 날짜는 readonly/datepicker 인 경우가 많아 value 만 바꾸면 폼 검증이 옛 값을 사용합니다.
-    # input/change 이벤트를 dispatch 해 폼이 새 값을 받도록 강제합니다.
+
+    # 날짜 입력 — 코레일은 두 가지 레이아웃을 혼용합니다:
+    #   a) hidden text input  : <input name="txtGoDate" value="YYYYMMDD">
+    #   b) 3개 select         : selGoYear / selGoMonth / selGoDay
+    # 어느 쪽이 살아있든 동작하도록 둘 다 시도합니다.
+    yyyymmdd = date.replace("-", "")
+    yyyy, mm, dd = yyyymmdd[:4], yyyymmdd[4:6], yyyymmdd[6:8]
+
     await page.evaluate(
         """
         (args) => {
           const [val, sel] = args;
-          const el = document.querySelector(sel);
-          if (!el) return;
-          el.value = val;
-          el.dispatchEvent(new Event('input',  { bubbles: true }));
-          el.dispatchEvent(new Event('change', { bubbles: true }));
+          const fire = (el) => {
+            el.dispatchEvent(new Event('input',  { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+          };
+          // (a) 단일 hidden input
+          document.querySelectorAll(sel).forEach(el => { el.value = val; fire(el); });
         }
         """,
-        [date.replace("-", ""), S.DATE_INPUT],
+        [yyyymmdd, S.DATE_INPUT],
     )
+    # (b) year/month/day select 들 — 있을 때만 적용
+    for sel, val in (
+        ("select[name='selGoYear']", yyyy),
+        ("select[name='selGoMonth']", mm),
+        ("select[name='selGoDay']", dd),
+    ):
+        try:
+            if await page.locator(sel).count():
+                await page.select_option(sel, value=val)
+        except Exception:
+            pass
+
     hh = time_str.split(":")[0].zfill(2)
-    try:
-        await page.select_option(S.TIME_SELECT, value=hh + "0000")
-    except Exception:
-        pass
+    for sel, val in (
+        (S.TIME_SELECT, hh + "0000"),
+        ("select[name='selGoHour']", hh),
+    ):
+        try:
+            if await page.locator(sel).count():
+                await page.select_option(sel, value=val)
+        except Exception:
+            pass
+
     await human_click(page, S.SEARCH_BTN)
     await page.wait_for_selector(S.RESULT_ROWS, timeout=20000)
+    await dismiss_popups(page)
 
     rows = await page.locator(S.RESULT_ROWS).all()
     out: list[dict[str, Any]] = []
@@ -140,7 +206,8 @@ async def search_trains(
         std_cell_html = await _txt(S.ROW_SOLD_OUT_TXT)
 
         sold_first = not first_cell_html or any(k in first_cell_html for k in S.SOLD_OUT_KEYWORDS)
-        sold_std = any(k in std_cell_html for k in S.SOLD_OUT_KEYWORDS) or "예매" not in std_cell_html
+        std_has_avail = any(k in std_cell_html for k in S.AVAIL_KEYWORDS)
+        sold_std = (not std_has_avail) or any(k in std_cell_html for k in S.SOLD_OUT_KEYWORDS)
 
         out.append(
             {
@@ -235,12 +302,27 @@ async def _pick_seat(page: Page, preferred_columns: list[str]) -> Optional[str]:
         return None
 
 
+async def _try_auto_assign(page: Page) -> bool:
+    """좌석맵에 진입한 직후 '자동배정' 버튼이 보이면 그것을 클릭한다.
+    자동배정은 코레일 기본 동작이고 좌석맵 DOM 변경에 영향 받지 않는 가장 안정적 경로."""
+    try:
+        loc = page.locator(S.AUTO_SEAT_BTN).first
+        if await loc.count():
+            await loc.scroll_into_view_if_needed()
+            await loc.click(delay=80)
+            await human_pause()
+            return True
+    except Exception:
+        pass
+    return False
+
+
 async def _try_book_row(
     page: Page, row: dict[str, Any], *, seat_class: str, preferred_columns: list[str]
 ) -> Optional[dict[str, Any]]:
     """
-    Click the appropriate '예매' button on the row, then pick a seat.
-    Returns booking info dict on success, else None.
+    Click the appropriate '예매' button on the row, pick a seat (or 자동배정),
+    and return booking info on success.
     """
     target_sel = S.ROW_FIRST_CLASS_BTN if seat_class == "first" else S.ROW_STD_CLASS_BTN
     btn = row["row"].locator(target_sel)
@@ -255,12 +337,22 @@ async def _try_book_row(
     except Exception:
         return None
 
+    await dismiss_popups(page)
+
+    # 1) 우선 수동 좌석 picker 로 창가(A/D) 시도.
     seat = await _pick_seat(page, preferred_columns if seat_class == "standard" else ["A", "D"])
+    # 2) 실패 시 '자동배정' 으로 fallback — 코레일이 좌석맵 대신 제공하는 안전 경로.
     if not seat:
-        # back to results to try next row
-        await page.go_back()
-        await page.wait_for_selector(S.RESULT_ROWS, timeout=10000)
-        return None
+        if await _try_auto_assign(page):
+            seat = "자동배정"
+        else:
+            # back to results to try next row
+            try:
+                await page.go_back()
+                await page.wait_for_selector(S.RESULT_ROWS, timeout=10000)
+            except Exception:
+                pass
+            return None
 
     # We're now on the hold/payment-wait page.
     return {
@@ -277,54 +369,89 @@ async def _try_book_row(
 # Navigate to the actual payment screen
 # ---------------------------------------------------------------------------
 
-async def navigate_to_payment(page: Page, *, max_steps: int = 5) -> bool:
+async def _payment_visible(page: Page) -> bool:
+    """결제 페이지 도달 여부 체크 — 메인 프레임 + 모든 iframe 검사."""
+    locators = [
+        page.locator(S.PAYMENT_PAGE_MARKER).first,
+        page.locator(S.PAY_BTN).first,
+    ]
+    for fr in page.frames:
+        if fr == page.main_frame:
+            continue
+        try:
+            locators.append(fr.locator(S.PAYMENT_PAGE_MARKER).first)
+            locators.append(fr.locator(S.PAY_BTN).first)
+        except Exception:
+            pass
+    for loc in locators:
+        try:
+            if await loc.count():
+                return True
+        except Exception:
+            continue
+    return False
+
+
+async def navigate_to_payment(
+    page: Page,
+    *,
+    notify=None,
+    job_id: str = "",
+    max_steps: int = 6,
+) -> bool:
     """
     좌석 확보 후, '다음/예매하기/진행' 류 버튼을 차례로 눌러 결제 페이지에 도달합니다.
-    결제 페이지에 도달하면 True. 도달 실패 (또는 예상 외 화면) 면 False.
+    결제 페이지에 도달하면 True, 아니면 False.
 
-    `auto_pay=False` 여도 사용자가 결제 화면을 확실히 볼 수 있도록 결제 페이지까지는
-    무조건 진입시키는 게 목적입니다. 실제 '결제하기'(돈을 빼는 최종 버튼) 클릭은
-    이 함수가 하지 않습니다.
+    `auto_pay=False` 여도 사용자가 결제 화면을 확실히 보고 카드선택만 하면 끝나도록
+    결제 페이지까지 진입시킵니다. 실제 '결제하기' 최종 클릭은 이 함수가 하지 않습니다.
+    각 단계마다 스크린샷을 남겨 어디서 막혔는지 사용자가 확인할 수 있게 합니다.
     """
     for step in range(max_steps):
-        # 이미 결제 페이지에 도달했는지 체크.
-        try:
-            if await page.locator(S.PAYMENT_PAGE_MARKER).first.count():
-                return True
-        except Exception:
-            pass
-        # PAY_BTN(='결제하기') 가 보이면 결제 페이지에 도달한 것이므로 멈춤.
-        try:
-            if await page.locator(S.PAY_BTN).first.count():
-                return True
-        except Exception:
-            pass
+        await dismiss_popups(page)
 
-        # 다음 단계 버튼 클릭.
-        try:
-            proceed = page.locator(S.PROCEED_BTN).first
-            if not await proceed.count():
-                log.info("payment.no_proceed_btn", step=step)
-                return False
-            await proceed.scroll_into_view_if_needed()
-            await proceed.click(delay=80)
-            await human_pause()
+        if await _payment_visible(page):
+            return True
+
+        # 다음 단계 버튼 클릭. main frame + iframe 모두에서 탐색.
+        clicked = False
+        candidates = [page.locator(S.PROCEED_BTN).first]
+        for fr in page.frames:
+            if fr == page.main_frame:
+                continue
             try:
-                await page.wait_for_load_state("domcontentloaded", timeout=15000)
+                candidates.append(fr.locator(S.PROCEED_BTN).first)
             except Exception:
                 pass
-        except Exception as exc:  # noqa: BLE001
-            log.warning("payment.step_failed", step=step, err=str(exc))
-            return False
 
-    # 마지막 한번 더 확인.
-    try:
-        return bool(
-            await page.locator(S.PAY_BTN).first.count()
-            or await page.locator(S.PAYMENT_PAGE_MARKER).first.count()
-        )
-    except Exception:
-        return False
+        for proceed in candidates:
+            try:
+                if not await proceed.count():
+                    continue
+                await proceed.scroll_into_view_if_needed()
+                await proceed.click(delay=80)
+                clicked = True
+                await human_pause()
+                try:
+                    await page.wait_for_load_state("domcontentloaded", timeout=15000)
+                except Exception:
+                    pass
+                break
+            except Exception as exc:  # noqa: BLE001
+                log.warning("payment.step_failed", step=step, err=str(exc))
+
+        if notify and job_id:
+            try:
+                shot = await _capture_screenshot(page, f"step{step}-{job_id}")
+                log.info("payment.step", step=step, shot=str(shot), clicked=clicked)
+            except Exception:
+                pass
+
+        if not clicked:
+            log.info("payment.no_proceed_btn", step=step)
+            break
+
+    return await _payment_visible(page)
 
 
 # ---------------------------------------------------------------------------
@@ -614,7 +741,7 @@ async def run_ktx_job(job, notify: Callable[..., Awaitable[None]]) -> dict[str, 
     booking_page: Page = booked.pop("page", page)
 
     # 무조건 결제 페이지까지 진입시킨다 — 사용자 요구.
-    reached = await navigate_to_payment(booking_page)
+    reached = await navigate_to_payment(booking_page, notify=notify, job_id=job.id)
     if not reached:
         shot = await _capture_screenshot(booking_page, f"stuck-{job.id}")
         await notify(

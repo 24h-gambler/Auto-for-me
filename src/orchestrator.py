@@ -268,6 +268,14 @@ class Orchestrator:
                 await running.user_decision.put(decision)
                 return f"✓ [{running.id}] '{decision}' 전달."
 
+        if not ENV.anthropic_api_key:
+            return (
+                "자유채팅은 Anthropic API 키가 필요합니다. 슬래시 명령으로 직접 부탁해 주세요:\n"
+                "  /ktx 서울 부산 2026-05-10 09:00 120\n"
+                "  /coupang 무선마우스 50000 사무용\n"
+                "또는 .env 의 ANTHROPIC_API_KEY 를 채우면 자연어 대화가 활성화됩니다."
+            )
+
         self.history.append({"role": "user", "content": user_text})
         for _ in range(6):
             resp = await chat(

@@ -14,7 +14,8 @@ ROOT = Path(__file__).resolve().parent.parent
 class Env(BaseSettings):
     model_config = SettingsConfigDict(env_file=str(ROOT / ".env"), extra="ignore")
 
-    anthropic_api_key: str = Field(..., alias="ANTHROPIC_API_KEY")
+    # API 키는 빈 값 허용 — 슬래시 명령만 쓰면 호출이 없으므로 키가 없어도 봇 가동 가능.
+    anthropic_api_key: str = Field("", alias="ANTHROPIC_API_KEY")
 
     telegram_bot_token: str = Field(..., alias="TELEGRAM_BOT_TOKEN")
     telegram_allowed_chat_ids: str = Field("", alias="TELEGRAM_ALLOWED_CHAT_IDS")

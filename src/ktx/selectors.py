@@ -21,15 +21,22 @@ DATE_INPUT = "input[name='txtGoDate']"
 TIME_SELECT = "select[name='txtGoTime']"
 SEARCH_BTN = "a.btn_search, input[name='search']"
 
-# 결과 테이블
-RESULT_ROWS = "table#tbl_search tbody tr"
+# 결과 테이블 — 코레일은 id 가 변경된 적 있어 후보 둘 다 매칭.
+RESULT_ROWS = (
+    "table#tbl_search tbody tr, "
+    "table.tbl_l tbody tr, "
+    "tbody#tbody tr, "
+    "table[summary*='조회'] tbody tr"
+)
 ROW_TRAIN_NO = "td:nth-child(2)"
 ROW_DEPT_TIME = "td:nth-child(3)"
 ROW_ARRV_TIME = "td:nth-child(4)"
-ROW_FIRST_CLASS_BTN = "td:nth-child(5) a"   # 특실 예매
-ROW_STD_CLASS_BTN = "td:nth-child(6) a"     # 일반실 예매
+ROW_FIRST_CLASS_BTN = "td:nth-child(5) a"   # 특실 예매/예약하기
+ROW_STD_CLASS_BTN = "td:nth-child(6) a"     # 일반실 예매/예약하기
 ROW_SOLD_OUT_TXT = "td:nth-child(6)"         # '매진' 텍스트가 들어가는 셀
-SOLD_OUT_KEYWORDS = ("매진", "예약대기", "Sold")
+SOLD_OUT_KEYWORDS = ("매진", "예약대기", "Sold", "좌석없음")
+# 예약 가능 표시 — 이 키워드가 셀에 있으면 매진이 아닌 것으로 본다.
+AVAIL_KEYWORDS = ("예매", "예약", "예약하기", "Book")
 
 # 좌석 선택 / 결제
 # 좌석 선택 후 → 승객정보/예약확인 → 결제 페이지로 진행하는 "다음/예매하기" 류 버튼들.
@@ -58,10 +65,24 @@ PAYMENT_PAGE_MARKER = (
 # 좌석 배치도 (좌석 picker)
 # 코레일은 보통 row*column grid: 1~20행 × A,B,(통로),C,D 열 형태.
 # 사용 가능한 좌석은 button/area 로 표현되며, data-seat-no 또는 alt/title 에 좌석명 포함.
-SEAT_BUTTONS = "a[data-seat-no], area[data-seat-no], button[data-seat-no], a.seat, button.seat"
+SEAT_BUTTONS = (
+    "a[data-seat-no], area[data-seat-no], button[data-seat-no], "
+    "a.seat, button.seat, "
+    "img[alt*='좌석'][alt*='가능']"
+)
 SEAT_AVAILABLE_ATTR = "data-status"   # 'available' | 'taken'
 SEAT_NAME_ATTR = "data-seat-no"       # 예: "3A", "12D"
-SEAT_CONFIRM_BTN = "input[name='seatConfirm'], a.btn_seat_confirm"
+SEAT_CONFIRM_BTN = (
+    "input[name='seatConfirm'], a.btn_seat_confirm, "
+    "a:has-text('좌석선택완료'), button:has-text('좌석선택완료')"
+)
+# 자동배정 — 좌석맵 진입 없이 바로 좌석 자동 할당으로 결제까지 진행.
+# 좌석 picker 가 동작 안 할 때의 fallback 이자, 사실상 가장 빠르고 안정적인 경로.
+AUTO_SEAT_BTN = (
+    "a:has-text('자동배정'), button:has-text('자동배정'), "
+    "a:has-text('자동 배정'), button:has-text('자동 배정'), "
+    "input[type='button'][value*='자동배정'], input[type='submit'][value*='자동배정']"
+)
 
 # 임시 확보 후 보이는 페이지 (결제 대기, 10분 카운트다운)
 HOLD_TIMER_TXT = ".hold_timer, #payment_timer, .timer"

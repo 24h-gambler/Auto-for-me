@@ -25,6 +25,13 @@ _client: AsyncAnthropic | None = None
 def client() -> AsyncAnthropic:
     global _client
     if _client is None:
+        if not ENV.anthropic_api_key:
+            raise RuntimeError(
+                "Anthropic API 키가 없습니다. 자유채팅(자연어 → 작업) 또는 쿠팡 분석을 "
+                "쓰려면 console.anthropic.com 에서 키를 발급해 .env 의 "
+                "ANTHROPIC_API_KEY 에 넣어주세요. "
+                "슬래시 명령(/ktx, /coupang 직접 파라미터)만 쓰는 경우엔 필요 없습니다."
+            )
         _client = AsyncAnthropic(api_key=ENV.anthropic_api_key)
     return _client
 

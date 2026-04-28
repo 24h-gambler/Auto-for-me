@@ -918,6 +918,23 @@ _BLOCK_CHECK_JS = """
 """
 
 
+# F5 후 더보기 N회 클릭 — 더 넓은 시간대를 한 번에 스캔하기 위함.
+_LOAD_MORE_JS = """
+() => {
+  const more = document.querySelector('a.page_group') ||
+               Array.from(document.querySelectorAll('a')).find(a =>
+                 (a.innerText || '').trim() === '더보기'
+               );
+  if (more) {
+    more.scrollIntoView({behavior: 'instant', block: 'center'});
+    more.click();
+    return true;
+  }
+  return false;
+}
+"""
+
+
 async def refresh_and_click_loop(
     job, notify: Callable[..., Awaitable[None]],
 ) -> dict[str, Any]:
@@ -941,6 +958,7 @@ async def refresh_and_click_loop(
 
     aggressive = bool(job.params.get("aggressive", False))
     allow_standing = bool(job.params.get("allow_standing", True))
+    expand_count = int(job.params.get("expand_count", 0))   # F5 후 더보기 N회
     base_lo, base_hi = (0.3, 0.8) if aggressive else (0.8, 2.0)
     scan_click_js = _build_scan_click_js(allow_standing)
 
@@ -949,7 +967,8 @@ async def refresh_and_click_loop(
         f"   페이지: {page.url}\n"
         f"   주기: {base_lo}~{base_hi}초\n"
         f"   잡힐 좌석: {'좌석+입석' if allow_standing else '좌석만'}\n"
-        f"   F5 → 매진 아닌 셀 즉시 클릭 → 예매 버튼 즉시 클릭 → 결제 페이지."
+        f"   더보기: {expand_count}회/회차 (0=초기 화면만 스캔)\n"
+        f"   F5 → 더보기 → 매진 아닌 셀 즉시 클릭 → 예매 버튼 즉시 클릭 → 결제."
     )
 
     deadline = CFG.ktx.poll.max_total_hours * 3600
@@ -1018,6 +1037,16 @@ async def refresh_and_click_loop(
         if blocked:
             await recover_from_block(page, marker="-8003/매크로", notify=notify, job_id=job.id)
             continue
+
+        # 2.5) 더보기 N회 펼치기 (사용자 옵션)
+        for _ in range(expand_count):
+            try:
+                clicked_more = await page.evaluate(_LOAD_MORE_JS)
+            except Exception:
+                clicked_more = False
+            if not clicked_more:
+                break
+            await asyncio.sleep(0.15)   # DOM 업데이트 짧게 대기
 
         # 3) 스캔 + 클릭 (단일 JS 호출 — 가장 빠름)
         try:

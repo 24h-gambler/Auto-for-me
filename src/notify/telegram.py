@@ -99,12 +99,14 @@ class TelegramService:
 
     async def cmd_help(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(
-            "⚡ HYPER 새로고침 모드 (사용자가 직접 로그인+검색 → 봇이 F5 따닥)\n"
-            "  사전: scripts\\launch_chrome.ps1 으로 진짜 Chrome 을 띄워야 함\n"
-            "  /refresh             ← 좌석+입석 둘 다 (≈1초마다 F5)\n"
-            "  /refresh !           ← 초고속 (≈0.5초마다 F5, 탐지 위험 ↑)\n"
-            "  /refresh 좌석        ← 좌석만, 입석 무시\n"
-            "  /refresh ! 좌석      ← 초고속 + 좌석만\n"
+            "⚡ HYPER 새로고침 모드 (진짜 Chrome + CDP)\n"
+            "  사전: scripts\\launch_chrome.ps1 으로 진짜 Chrome 띄움\n"
+            "  /refresh             ← 기본 (초기 화면만, 좌석+입석, ≈1초)\n"
+            "  /refresh 5           ← F5 마다 더보기 5회 자동 클릭\n"
+            "  /refresh !           ← 초고속 (≈0.5초)\n"
+            "  /refresh ! 5         ← 초고속 + 더보기 5회\n"
+            "  /refresh 좌석 3      ← 좌석만 + 더보기 3회\n"
+            "  /refresh ! 좌석 5    ← 초고속 + 좌석만 + 더보기 5회\n"
             "\n"
             "  → 잡히면: 셀 클릭 + 예매 버튼 단일 JS 호출로 따닥 → 알림\n"
             "\n"
@@ -193,42 +195,53 @@ class TelegramService:
     async def cmd_refresh(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         """/refresh — HYPER 새로고침 모드.
 
-        사용자가 봇 chromium 창에서 직접 로그인+검색까지 끝낸 페이지를
-        받아, 봇이 F5 + 매진 아닌 셀 + 예매 버튼을 단일 JS 호출로 따닥
-        클릭한다. 사람 손 속도와 동등.
+        사용자가 진짜 Chrome 에서 로그인+검색까지 끝낸 페이지를 받아,
+        봇이 F5 + 매진 아닌 셀 + 예매 버튼을 단일 JS 호출로 따닥 클릭.
 
-        플래그 (한 줄 끝에 공백으로 구분, 순서 무관):
+        플래그 (공백 구분, 순서 무관):
           !       초고속 (≈0.3~0.8초마다 F5). 기본은 ≈0.8~2초.
           좌석    좌석만 잡음. (입석+좌석 무시)
+          숫자    F5 후 더보기 N회 자동 클릭. 0=초기 화면만, 5=5번 펼침.
 
         예시:
-          /refresh                  ← 좌석 + 입석+좌석 (기본 속도)
-          /refresh !                ← 초고속
-          /refresh 좌석             ← 좌석만
-          /refresh ! 좌석           ← 초고속 + 좌석만
+          /refresh                  ← 기본 (초기 화면만, 좌석+입석)
+          /refresh 5                ← F5 마다 더보기 5회 펼친 뒤 스캔
+          /refresh ! 5              ← 초고속 + 더보기 5회
+          /refresh 좌석 3           ← 좌석만 + 더보기 3회
+          /refresh ! 좌석 5         ← 초고속 + 좌석만 + 더보기 5회
         """
         if not _is_authorized(update.effective_chat.id):
             return
         a = ctx.args or []
         aggressive = "!" in a
-        # '좌석' 만 명시되면 입석+좌석 잡지 않음. 기본은 둘 다 잡음.
         if "좌석" in a and "입석" not in a:
             allow_standing = False
         else:
             allow_standing = True
+        # 숫자 토큰을 expand_count 로 해석 (없으면 0).
+        expand_count = 0
+        for tok in a:
+            try:
+                n = int(tok)
+                if 0 <= n <= 50:
+                    expand_count = n
+                    break
+            except ValueError:
+                continue
         params = {
             "seat_class_strategy": "refresh",
             "aggressive": bool(aggressive),
             "allow_standing": allow_standing,
+            "expand_count": expand_count,
         }
         self._default_chat_id = update.effective_chat.id
         job = self.manager.submit("ktx", params, chat_id=update.effective_chat.id)
         await update.message.reply_text(
-            f"🔁 [{job.id}] 새로고침 모드 시작 "
-            f"({'🔥빠름' if aggressive else '🐢보통'}, "
-            f"{'좌석만' if not allow_standing else '좌석+입석'})\n"
-            f"봇 chromium 창에서 검색 결과 페이지가 떠 있어야 합니다.\n"
-            f"매진 아닌 좌석 발견 시 즉시 클릭 → 예매 → 결제 페이지로."
+            f"🔁 [{job.id}] 새로고침 모드 시작\n"
+            f"   속도: {'🔥초고속' if aggressive else '🐢보통'}\n"
+            f"   범위: {'좌석만' if not allow_standing else '좌석+입석'}\n"
+            f"   더보기: {expand_count}회/회차 (0=초기 화면만)\n"
+            f"매진 아닌 좌석 발견 시 즉시 클릭 → 예매 → 결제 페이지."
         )
 
     async def cmd_book(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:

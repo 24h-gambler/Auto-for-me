@@ -99,11 +99,13 @@ class TelegramService:
 
     async def cmd_help(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(
-            "🚄 KTX 예매 (사용자가 직접 로그인+검색 → /refresh 가 가장 안전·빠름)\n"
-            "  /refresh             ← 좌석+입석 둘 다 잡음 (15~30초마다 새로고침)\n"
-            "  /refresh !           ← 빠른 새로고침 (8~18초)\n"
-            "  /refresh 좌석        ← 좌석만, 입석+좌석 무시\n"
-            "  /refresh ! 좌석      ← 빠른 + 좌석만\n"
+            "⚡ HYPER 새로고침 모드 (사용자가 직접 로그인+검색 → 봇이 F5 따닥)\n"
+            "  /refresh             ← 좌석+입석 둘 다 (≈1초마다 F5)\n"
+            "  /refresh !           ← 초고속 (≈0.5초마다 F5, 탐지 위험 ↑)\n"
+            "  /refresh 좌석        ← 좌석만, 입석 무시\n"
+            "  /refresh ! 좌석      ← 초고속 + 좌석만\n"
+            "\n"
+            "  → 잡히면: 셀 클릭 + 예매 버튼 단일 JS 호출로 따닥 → 알림\n"
             "\n"
             "🚄 자동 모드 (봇이 처음부터 다 함, 탐지 위험)\n"
             "  /book 서울 부산 2026-05-10 09:00 120     ← 빠른 자동 폴링\n"
@@ -188,20 +190,21 @@ class TelegramService:
         )
 
     async def cmd_refresh(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        """/refresh — 매크로 회피 모드.
-        사용자가 봇 chromium 창에서 직접 로그인 + 검색까지 한 페이지를
-        그대로 받아, 봇은 새로고침 + 매진 아닌 셀 클릭 + 예매 버튼 클릭 자동화.
+        """/refresh — HYPER 새로고침 모드.
+
+        사용자가 봇 chromium 창에서 직접 로그인+검색까지 끝낸 페이지를
+        받아, 봇이 F5 + 매진 아닌 셀 + 예매 버튼을 단일 JS 호출로 따닥
+        클릭한다. 사람 손 속도와 동등.
 
         플래그 (한 줄 끝에 공백으로 구분, 순서 무관):
-          !       빠른 새로고침 (8~18초). 기본은 15~30초.
+          !       초고속 (≈0.3~0.8초마다 F5). 기본은 ≈0.8~2초.
           좌석    좌석만 잡음. (입석+좌석 무시)
-          입석    입석+좌석 도 잡음 (기본).
 
         예시:
-          /refresh                  ← 좌석 + 입석+좌석 (기본)
-          /refresh !                ← 빠른 모드
-          /refresh 좌석             ← 좌석만, 입석+좌석 무시
-          /refresh ! 좌석           ← 빠른 + 좌석만
+          /refresh                  ← 좌석 + 입석+좌석 (기본 속도)
+          /refresh !                ← 초고속
+          /refresh 좌석             ← 좌석만
+          /refresh ! 좌석           ← 초고속 + 좌석만
         """
         if not _is_authorized(update.effective_chat.id):
             return

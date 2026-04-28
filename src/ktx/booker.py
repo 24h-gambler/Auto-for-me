@@ -847,18 +847,83 @@ async def _click_load_more(page: Page) -> bool:
         return False
 
 
+# ── HYPER 모드 — JS 단일 호출로 스캔 + 클릭 ─────────────────────────
+# Python ↔ Playwright ↔ Browser 왕복을 최소화 — 매 회차 거의 1회.
+# 사람이 F5 누르고 보이는 즉시 누르는 속도 (≈0.5초 클릭반응) 와 동등.
+def _build_scan_click_js(allow_standing: bool) -> str:
+    return f"""
+    () => {{
+      const allowStanding = {str(allow_standing).lower()};
+      const links = Array.from(document.querySelectorAll('a'));
+
+      // 1순위: 가격 표시된 좌석 링크 (일반실/특실)
+      for (const a of links) {{
+        const txt = (a.innerText || '').trim();
+        if (!txt) continue;
+        if (txt.includes('매진') && !txt.includes('임박')) continue;
+        if (a.querySelector('p.txt_gr, p.txt_price')) {{
+          a.click();
+          return {{ kind: 'seat', text: txt.slice(0, 80) }};
+        }}
+      }}
+
+      // 2순위: 입석+좌석 (옵션)
+      if (allowStanding) {{
+        for (const a of links) {{
+          const txt = (a.innerText || '').trim();
+          if (!txt) continue;
+          if (txt.includes('매진') && !txt.includes('임박')) continue;
+          if (a.querySelector('.tck_etc_use') && txt.includes('입석')) {{
+            a.click();
+            return {{ kind: 'standing', text: txt.slice(0, 80) }};
+          }}
+        }}
+      }}
+      return null;
+    }}
+    """
+
+
+_RESERVE_BTN_JS = """
+() => {
+  const direct = document.querySelector('button.reservbtn, button.btn_bn-blue02');
+  if (direct && (direct.innerText || '').includes('예매')) { direct.click(); return true; }
+  if (direct && !direct.innerText) { direct.click(); return true; }
+  const fallback = Array.from(document.querySelectorAll('button')).find(b =>
+    ((b.innerText || '').trim() === '예매')
+  );
+  if (fallback) { fallback.click(); return true; }
+  return false;
+}
+"""
+
+
+_BLOCK_CHECK_JS = """
+() => {
+  const t = (document.body && document.body.innerText) || '';
+  return (
+    t.includes('-8003') ||
+    t.includes('매크로') ||
+    t.includes('미허가 도구') ||
+    t.includes('이용이 제한') ||
+    t.includes('비정상적인 접근')
+  );
+}
+"""
+
+
 async def refresh_and_click_loop(
     job, notify: Callable[..., Awaitable[None]],
 ) -> dict[str, Any]:
-    """사용자가 직접 검색까지 한 페이지를 받아 다음을 무한 반복:
-       1. 차단 감지/회복
-       2. 보이는 셀 스캔 → 매진 아닌 거 발견 시 클릭 + 예매 버튼 클릭
-       3. 없으면 '더보기' 로 다음 시간대 로드 후 다시 스캔 (최대 5회)
-       4. 그래도 없으면 랜덤 15~30초 대기 후 새로고침
+    """사용자가 직접 검색까지 한 페이지에서 F5 따닥 + 셀 따닥 + 예매 따닥.
 
-    옵션:
-      - aggressive=true 면 새로고침 주기 8~18초 (탐지 위험 ↑)
-      - 입석+좌석 도 잡을지는 job.params['allow_standing'] (기본 True)
+    설계 원칙:
+      - Python ↔ 브라우저 왕복 최소화: scan + click 을 단일 page.evaluate 로.
+      - human pause 없음 (속도가 우선).
+      - 기본 0.8~2.0초 간격, aggressive 0.3~0.8초.
+      - 매진만 있으면 그냥 reload 반복 — '더보기' 안 누름 (사용자가 미리
+        필요한 시간대 펼쳐둔다는 가정).
+      - 좌석 잡으면 즉시 button.reservbtn (예매) JS 클릭 → navigate_to_payment.
     """
     page = await _find_user_results_page()
     if page is None:
@@ -870,46 +935,49 @@ async def refresh_and_click_loop(
 
     aggressive = bool(job.params.get("aggressive", False))
     allow_standing = bool(job.params.get("allow_standing", True))
-    base_lo, base_hi = (8, 18) if aggressive else (15, 30)
+    base_lo, base_hi = (0.3, 0.8) if aggressive else (0.8, 2.0)
+    scan_click_js = _build_scan_click_js(allow_standing)
 
     await notify(
-        f"🔁 [{job.id}] 새로고침 모드 시작\n"
+        f"⚡ [{job.id}] HYPER 새로고침 모드 시작\n"
         f"   페이지: {page.url}\n"
-        f"   주기: {base_lo}~{base_hi}초 (랜덤)\n"
-        f"   입석+좌석: {'잡음' if allow_standing else '안 잡음'}\n"
-        f"   매진 아닌 좌석 발견 시 즉시 클릭 → 예매 버튼 클릭 → 결제 페이지로."
+        f"   주기: {base_lo}~{base_hi}초\n"
+        f"   잡힐 좌석: {'좌석+입석' if allow_standing else '좌석만'}\n"
+        f"   F5 → 매진 아닌 셀 즉시 클릭 → 예매 버튼 즉시 클릭 → 결제 페이지."
     )
 
     deadline = CFG.ktx.poll.max_total_hours * 3600
     started = asyncio.get_event_loop().time()
     attempt = 0
     last_ping = started
+    consecutive_errors = 0
 
-    async def _try_finalize(result: dict[str, Any]) -> dict[str, Any]:
-        """예매 버튼 누른 뒤 결제 페이지까지 끌고 가기."""
-        await human_pause()
-        shot = await _capture_screenshot(page, f"clicked-{job.id}")
+    async def _try_finalize(result: dict[str, Any], reserve_clicked: bool) -> dict[str, Any]:
+        """좌석 잡혔다 — 알림 + 결제 페이지까지 진입."""
+        shot = await _capture_screenshot(page, f"hit-{job.id}")
+        kind_kr = "좌석" if result["kind"] == "seat" else "입석+좌석"
         await notify(
-            f"🎯 [{job.id}] 좌석 클릭 + 예매 시도!\n"
-            f"   종류: {'좌석' if result['kind'] == 'seat' else '입석+좌석'}\n"
-            f"   셀: {result['cell_text']}\n"
-            f"   결제 페이지까지 자동 진입 시도합니다.",
+            f"🔥🔥 [{job.id}] 잡았습니다! ({kind_kr})\n"
+            f"   {result['text']}\n"
+            f"   예매 버튼 {'✅ 클릭됨' if reserve_clicked else '⚠️ 못 찾음'}\n"
+            f"   결제 페이지 진입 시도 중...",
             photo_path=str(shot),
         )
+        # navigate_to_payment 가 다음 단계 (좌석/승객/결제) 진행
         reached = await navigate_to_payment(page, notify=notify, job_id=job.id)
         if reached:
             shot2 = await _capture_screenshot(page, f"payment-{job.id}")
             await notify(
                 f"✅ [{job.id}] 결제 페이지 도달!\n"
-                f"PC chromium 화면에서 결제수단 선택 → '결제하기' 클릭. (좌석 ≈10분 유지)",
+                f"PC chromium 화면에서 결제수단 선택 → '결제하기'. (좌석 ≈10분 유지)",
                 photo_path=str(shot2),
             )
             return {"reached_payment": True, "attempts": attempt, "kind": result["kind"]}
         shot3 = await _capture_screenshot(page, f"stuck-{job.id}")
         dump = await _dump_html(page, f"stuck-{job.id}")
         await notify(
-            f"⚠️ [{job.id}] 좌석 클릭은 됐는데 결제 페이지까지 자동 진입 실패.\n"
-            f"PC 화면에서 직접 진행해주세요. 좌석 ≈10분 유지.\n"
+            f"⚠️ [{job.id}] 좌석 잡았는데 결제 페이지 자동 진입 실패.\n"
+            f"PC 화면에서 직접 다음 단계 진행. 좌석 ≈10분 유지.\n"
             f"덤프: {dump.name}",
             photo_path=str(shot3),
         )
@@ -919,38 +987,59 @@ async def refresh_and_click_loop(
         attempt += 1
         now = asyncio.get_event_loop().time()
         if now - started > deadline:
-            raise TimeoutError("새로고침 모드가 max_total_hours 를 초과했습니다.")
+            raise TimeoutError("HYPER 모드가 max_total_hours 를 초과했습니다.")
 
-        # 1) 차단 페이지 검사
-        marker = await detect_block(page)
-        if marker:
-            await recover_from_block(page, marker=marker, notify=notify, job_id=job.id)
+        # 1) 새로고침 (F5)
+        try:
+            await page.reload(wait_until="domcontentloaded", timeout=15000)
+            consecutive_errors = 0
+        except Exception as exc:  # noqa: BLE001
+            consecutive_errors += 1
+            log.warning("hyper.reload_failed", err=str(exc), n=consecutive_errors)
+            if consecutive_errors > 5:
+                await notify(f"⚠️ [{job.id}] 새로고침 5회 연속 실패. 30초 쉽니다.")
+                await asyncio.sleep(30)
+                consecutive_errors = 0
+            else:
+                await asyncio.sleep(0.5)
             continue
 
-        # 2) 현재 보이는 화면에서 스캔 + 클릭
-        result = await _scan_and_reserve(page, allow_standing=allow_standing)
+        # 2) 차단 페이지 검사 (JS 한 줄, 거의 즉시)
+        try:
+            blocked = await page.evaluate(_BLOCK_CHECK_JS)
+        except Exception:
+            blocked = False
+        if blocked:
+            await recover_from_block(page, marker="-8003/매크로", notify=notify, job_id=job.id)
+            continue
+
+        # 3) 스캔 + 클릭 (단일 JS 호출 — 가장 빠름)
+        try:
+            result = await page.evaluate(scan_click_js)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("hyper.scan_failed", err=str(exc))
+            result = None
+
         if result:
-            return await _try_finalize(result)
+            # 4) 예매 버튼 즉시 클릭 (JS, 등장할 때까지 짧은 폴링)
+            reserve_clicked = False
+            for _ in range(20):  # 최대 ~2초
+                try:
+                    if await page.evaluate(_RESERVE_BTN_JS):
+                        reserve_clicked = True
+                        break
+                except Exception:
+                    pass
+                await asyncio.sleep(0.1)
 
-        # 3) 안 보이면 '더보기' 로 펼치며 최대 5회 추가 스캔
-        loaded = 0
-        for _ in range(5):
-            if not await _click_load_more(page):
-                break
-            loaded += 1
-            result = await _scan_and_reserve(page, allow_standing=allow_standing)
-            if result:
-                return await _try_finalize(result)
+            return await _try_finalize(result, reserve_clicked)
 
-        # 4) 진행 알림 (10회마다 또는 2분마다)
-        if attempt % 10 == 0 or now - last_ping > 120:
-            await notify(
-                f"⏳ [{job.id}] {attempt}회차 — 아직 다 매진 "
-                f"(이번 회차 더보기 {loaded}회 시도). 계속 시도 중."
-            )
+        # 5) 진행 알림 (50회마다 또는 30초마다)
+        if attempt % 50 == 0 or now - last_ping > 30:
+            await notify(f"⚡ [{job.id}] {attempt}회차 — 아직 매진. 계속 F5 중.")
             last_ping = now
 
-        # 5) 랜덤 대기 후 새로고침
+        # 6) 짧은 랜덤 대기 후 다시 F5
         delay = random.uniform(base_lo, base_hi)
         try:
             await asyncio.wait_for(job.cancel_event.wait(), timeout=delay)
@@ -958,14 +1047,7 @@ async def refresh_and_click_loop(
         except asyncio.TimeoutError:
             pass
 
-        try:
-            await page.reload(wait_until="domcontentloaded")
-            await human_arrival_pause()
-        except Exception as exc:  # noqa: BLE001
-            log.warning("refresh.reload_failed", err=str(exc))
-            await asyncio.sleep(5)
-
-    raise asyncio.CancelledError("user cancelled refresh loop")
+    raise asyncio.CancelledError("user cancelled hyper refresh loop")
 
 
 # ---------------------------------------------------------------------------

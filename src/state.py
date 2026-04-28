@@ -112,6 +112,16 @@ def load_resumable_jobs() -> list[dict[str, Any]]:
     return out
 
 
+def mark_job_interrupted(job_id: str) -> None:
+    """이전 실행에서 비정상 종료된 작업을 'interrupted' 상태로 표시."""
+    with _conn() as c:
+        c.execute(
+            "UPDATE jobs SET status='interrupted', updated_at=? WHERE id=? "
+            "AND status IN ('queued','running')",
+            (int(time.time()), job_id),
+        )
+
+
 WATCH_LIST_FILE = Path("watch_list.json")
 
 

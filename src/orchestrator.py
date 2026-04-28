@@ -198,16 +198,25 @@ class JobManager:
         return job
 
     async def resume_pending(self) -> int:
-        """Re-submit jobs that were queued/running before the last shutdown."""
+        """이전 실행이 비정상 종료되어 남아있는 작업들을 정리만 한다.
+        자동으로 다시 시작하지 않음 — 사용자가 Chrome 준비 안 된 상태에서
+        리로드 루프가 돌면 안 되므로. 사용자는 /refresh 로 새로 시작."""
         rows = state.load_resumable_jobs()
+        if not rows:
+            return 0
         for r in rows:
-            if r["kind"] not in ("ktx", "coupang"):
-                continue
-            self.submit(r["kind"], r["params"], chat_id=r.get("chat_id"), resume_id=r["id"])
-            await self.notify(
-                f"♻️ [{r['id']}] {r['kind']} 작업을 이어서 진행합니다.",
-                chat_id=r.get("chat_id"),
-            )
+            state.mark_job_interrupted(r["id"])
+        # 첫 chat_id 로 한 번만 알림.
+        chat_id = next((r.get("chat_id") for r in rows if r.get("chat_id")), None)
+        if chat_id is None:
+            return len(rows)
+        lines = [f"⏸️ 이전 실행에서 멈춰있던 작업 {len(rows)}개를 정리했습니다 (자동 재시작 안 함):"]
+        for r in rows[:5]:
+            lines.append(f"   • [{r['id']}] {r['kind']}")
+        if len(rows) > 5:
+            lines.append(f"   • ... 외 {len(rows) - 5}개")
+        lines.append("\n새로 시작하려면 Chrome 준비 후 /refresh 를 보내세요.")
+        await self.notify("\n".join(lines), chat_id=chat_id)
         return len(rows)
 
     def list(self) -> list[Job]:

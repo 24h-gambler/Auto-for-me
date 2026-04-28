@@ -289,6 +289,14 @@ class TelegramService:
     async def _start_refresh(
         self, *, chat_id: int, reply_to, aggressive: bool, allow_standing: bool, expand_count: int
     ) -> None:
+        # 이미 돌고 있는 ktx 작업이 있으면 먼저 취소 — 같은 페이지를 두고
+        # 두 작업이 충돌하지 않게.
+        cancelled_ids = []
+        for j in list(self.manager.jobs.values()):
+            if j.kind == "ktx" and j.status in ("queued", "running"):
+                if self.manager.cancel(j.id):
+                    cancelled_ids.append(j.id)
+
         params = {
             "seat_class_strategy": "refresh",
             "aggressive": aggressive,
@@ -297,12 +305,15 @@ class TelegramService:
         }
         self._default_chat_id = chat_id
         job = self.manager.submit("ktx", params, chat_id=chat_id)
+        notice = ""
+        if cancelled_ids:
+            notice = f"\n   (이전 작업 {', '.join(cancelled_ids)} 취소됨)"
         await reply_to(
             f"🔁 [{job.id}] 새로고침 모드 시작\n"
             f"   속도: {'🔥초고속' if aggressive else '🐢보통'}\n"
             f"   범위: {'좌석만' if not allow_standing else '좌석+입석'}\n"
-            f"   더보기: {expand_count}회/회차\n"
-            f"진행 알림은 5분마다. 잡히는 즉시 별도 알림."
+            f"   더보기: {expand_count}회/회차{notice}\n"
+            f"진행 알림은 15분마다. 잡히는 즉시 별도 알림."
         )
 
     async def cmd_book(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:

@@ -892,13 +892,38 @@ def _build_scan_click_js(allow_standing: bool) -> str:
 
 _RESERVE_BTN_JS = """
 () => {
-  const direct = document.querySelector('button.reservbtn, button.btn_bn-blue02');
-  if (direct && (direct.innerText || '').includes('예매')) { direct.click(); return true; }
-  if (direct && !direct.innerText) { direct.click(); return true; }
-  const fallback = Array.from(document.querySelectorAll('button')).find(b =>
-    ((b.innerText || '').trim() === '예매')
-  );
-  if (fallback) { fallback.click(); return true; }
+  const isVisible = (el) => {
+    if (!el) return false;
+    if (el.disabled) return false;
+    if (el.offsetParent === null) return false;        // display:none / hidden
+    const r = el.getBoundingClientRect();
+    if (r.width === 0 || r.height === 0) return false; // zero-size
+    return true;
+  };
+
+  // 1순위: .reservbtn (가장 구체적). 보이고 활성 상태인 첫 버튼만.
+  for (const btn of document.querySelectorAll('button.reservbtn')) {
+    if (!isVisible(btn)) continue;
+    btn.click();
+    return true;
+  }
+
+  // 2순위: 보이는 버튼 중 텍스트가 정확히 '예매' 인 것.
+  for (const btn of document.querySelectorAll('button')) {
+    if (!isVisible(btn)) continue;
+    if ((btn.innerText || '').trim() === '예매') {
+      btn.click();
+      return true;
+    }
+  }
+
+  // 3순위: btn_bn-blue02 (코레일 파란 버튼) 중 보이는 것.
+  for (const btn of document.querySelectorAll('button.btn_bn-blue02')) {
+    if (!isVisible(btn)) continue;
+    btn.click();
+    return true;
+  }
+
   return false;
 }
 """

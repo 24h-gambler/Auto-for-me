@@ -1069,9 +1069,12 @@ async def refresh_and_click_loop(
 
             return await _try_finalize(result, reserve_clicked)
 
-        # 5) 진행 알림 (50회마다 또는 30초마다)
-        if attempt % 50 == 0 or now - last_ping > 30:
-            await notify(f"⚡ [{job.id}] {attempt}회차 — 아직 매진. 계속 F5 중.")
+        # 5) 진행 알림 — 5분에 한 번만 (스팸 방지). 잡힘 알림은 즉시.
+        if now - last_ping > 300:
+            elapsed_min = int((now - started) / 60)
+            await notify(
+                f"⚡ [{job.id}] {attempt}회차 · {elapsed_min}분 경과 — 아직 매진. 계속 F5 중."
+            )
             last_ping = now
 
         # 6) 짧은 랜덤 대기 후 다시 F5

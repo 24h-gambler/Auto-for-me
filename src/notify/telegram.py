@@ -17,10 +17,11 @@ import asyncio
 from pathlib import Path
 from typing import Optional
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -65,6 +66,7 @@ class TelegramService:
         self.app.add_handler(CommandHandler("watch", self.cmd_watch))
         self.app.add_handler(CommandHandler("unwatch", self.cmd_unwatch))
         self.app.add_handler(CommandHandler("watches", self.cmd_watches))
+        self.app.add_handler(CallbackQueryHandler(self.cb_refresh, pattern="^rf:"))
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_text))
 
     # ---- Notifier (used by orchestrator/booker/ranker) ------------------
@@ -101,12 +103,11 @@ class TelegramService:
         await update.message.reply_text(
             "⚡ HYPER 새로고침 모드 (진짜 Chrome + CDP)\n"
             "  사전: scripts\\launch_chrome.ps1 으로 진짜 Chrome 띄움\n"
-            "  /refresh             ← 기본 (초기 화면만, 좌석+입석, ≈1초)\n"
-            "  /refresh 5           ← F5 마다 더보기 5회 자동 클릭\n"
-            "  /refresh !           ← 초고속 (≈0.5초)\n"
-            "  /refresh ! 5         ← 초고속 + 더보기 5회\n"
-            "  /refresh 좌석 3      ← 좌석만 + 더보기 3회\n"
-            "  /refresh ! 좌석 5    ← 초고속 + 좌석만 + 더보기 5회\n"
+            "  /refresh             ← 인라인 버튼 메뉴 (즉시 / +1 / +2 / +3 / 좌석만 / 초고속)\n"
+            "  /refresh 1           ← 더보기 1회 (수동 입력)\n"
+            "  /refresh ! 좌석 2    ← 초고속 + 좌석만 + 더보기 2회\n"
+            "  ※ 더보기는 최대 3회 (그 이상은 좌석 놓침 빈번)\n"
+            "  ※ 진행 알림은 5분마다, 잡히는 즉시 별도 알림\n"
             "\n"
             "  → 잡히면: 셀 클릭 + 예매 버튼 단일 JS 호출로 따닥 → 알림\n"
             "\n"
@@ -195,53 +196,103 @@ class TelegramService:
     async def cmd_refresh(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         """/refresh — HYPER 새로고침 모드.
 
-        사용자가 진짜 Chrome 에서 로그인+검색까지 끝낸 페이지를 받아,
-        봇이 F5 + 매진 아닌 셀 + 예매 버튼을 단일 JS 호출로 따닥 클릭.
-
-        플래그 (공백 구분, 순서 무관):
-          !       초고속 (≈0.3~0.8초마다 F5). 기본은 ≈0.8~2초.
-          좌석    좌석만 잡음. (입석+좌석 무시)
-          숫자    F5 후 더보기 N회 자동 클릭. 0=초기 화면만, 5=5번 펼침.
-
-        예시:
-          /refresh                  ← 기본 (초기 화면만, 좌석+입석)
-          /refresh 5                ← F5 마다 더보기 5회 펼친 뒤 스캔
-          /refresh ! 5              ← 초고속 + 더보기 5회
-          /refresh 좌석 3           ← 좌석만 + 더보기 3회
-          /refresh ! 좌석 5         ← 초고속 + 좌석만 + 더보기 5회
+        인자 없이 보내면 인라인 버튼 메뉴가 나오고, 인자가 있으면 즉시 시작.
+        더보기는 최대 3회 (그 이상은 좌석 놓침이 많아 캡).
         """
         if not _is_authorized(update.effective_chat.id):
             return
         a = ctx.args or []
+
+        # 인자 없으면 메뉴 띄움.
+        if not a:
+            self._default_chat_id = update.effective_chat.id
+            kb = [
+                [
+                    InlineKeyboardButton("⚡ 즉시", callback_data="rf:0:0:s"),
+                    InlineKeyboardButton("🔍 더보기 1", callback_data="rf:0:1:s"),
+                    InlineKeyboardButton("📜 더보기 2", callback_data="rf:0:2:s"),
+                    InlineKeyboardButton("📚 더보기 3", callback_data="rf:0:3:s"),
+                ],
+                [
+                    InlineKeyboardButton("💺 좌석만 즉시", callback_data="rf:0:0:o"),
+                    InlineKeyboardButton("💺 좌석만 +1", callback_data="rf:0:1:o"),
+                    InlineKeyboardButton("💺 좌석만 +2", callback_data="rf:0:2:o"),
+                    InlineKeyboardButton("💺 좌석만 +3", callback_data="rf:0:3:o"),
+                ],
+                [
+                    InlineKeyboardButton("🔥 초고속 즉시", callback_data="rf:1:0:s"),
+                    InlineKeyboardButton("🔥 초고속 +1", callback_data="rf:1:1:s"),
+                ],
+            ]
+            await update.message.reply_text(
+                "어떤 모드로 시작할까요?\n"
+                "  · 즉시 = 초기 화면만 스캔 (가장 빠름, 좁은 시간대)\n"
+                "  · 더보기 N = F5 마다 더보기 N번 펼치고 스캔 (넓은 시간대)\n"
+                "  · 좌석만 = 입석+좌석 무시\n"
+                "  · 초고속 = ≈0.5초마다 F5 (탐지 위험 ↑)",
+                reply_markup=InlineKeyboardMarkup(kb),
+            )
+            return
+
+        # 인자 직접 파싱 (기존 동작 유지) — expand 는 0~3 으로 캡.
         aggressive = "!" in a
-        if "좌석" in a and "입석" not in a:
-            allow_standing = False
-        else:
-            allow_standing = True
-        # 숫자 토큰을 expand_count 로 해석 (없으면 0).
+        allow_standing = not ("좌석" in a and "입석" not in a)
         expand_count = 0
         for tok in a:
             try:
                 n = int(tok)
-                if 0 <= n <= 50:
-                    expand_count = n
-                    break
+                expand_count = max(0, min(3, n))
+                break
             except ValueError:
                 continue
+        await self._start_refresh(
+            chat_id=update.effective_chat.id,
+            reply_to=update.message.reply_text,
+            aggressive=aggressive,
+            allow_standing=allow_standing,
+            expand_count=expand_count,
+        )
+
+    async def cb_refresh(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """인라인 버튼 콜백 — callback_data 형식: 'rf:<aggr>:<expand>:<seat>'
+            aggr: 0|1, expand: 0~3, seat: 's' (좌석+입석) | 'o' (좌석만)"""
+        q = update.callback_query
+        if not q or not _is_authorized(q.message.chat_id):
+            return
+        await q.answer()
+        try:
+            _, aggr, exp, seat = q.data.split(":")
+            aggressive = bool(int(aggr))
+            expand_count = max(0, min(3, int(exp)))
+            allow_standing = (seat == "s")
+        except Exception:
+            await q.edit_message_text("⚠️ 옵션 파싱 오류.")
+            return
+        await self._start_refresh(
+            chat_id=q.message.chat_id,
+            reply_to=q.edit_message_text,
+            aggressive=aggressive,
+            allow_standing=allow_standing,
+            expand_count=expand_count,
+        )
+
+    async def _start_refresh(
+        self, *, chat_id: int, reply_to, aggressive: bool, allow_standing: bool, expand_count: int
+    ) -> None:
         params = {
             "seat_class_strategy": "refresh",
-            "aggressive": bool(aggressive),
+            "aggressive": aggressive,
             "allow_standing": allow_standing,
             "expand_count": expand_count,
         }
-        self._default_chat_id = update.effective_chat.id
-        job = self.manager.submit("ktx", params, chat_id=update.effective_chat.id)
-        await update.message.reply_text(
+        self._default_chat_id = chat_id
+        job = self.manager.submit("ktx", params, chat_id=chat_id)
+        await reply_to(
             f"🔁 [{job.id}] 새로고침 모드 시작\n"
             f"   속도: {'🔥초고속' if aggressive else '🐢보통'}\n"
             f"   범위: {'좌석만' if not allow_standing else '좌석+입석'}\n"
-            f"   더보기: {expand_count}회/회차 (0=초기 화면만)\n"
-            f"매진 아닌 좌석 발견 시 즉시 클릭 → 예매 → 결제 페이지."
+            f"   더보기: {expand_count}회/회차\n"
+            f"진행 알림은 5분마다. 잡히는 즉시 별도 알림."
         )
 
     async def cmd_book(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:

@@ -73,11 +73,28 @@ class BrowserPool:
                 await self._start_launch()
 
     async def _start_cdp(self, cdp_url: str) -> None:
-        """사용자가 띄운 진짜 Chrome 에 붙는다."""
+        """사용자가 띄운 진짜 Chrome 에 붙는다. Chrome 이 아직 안 떴어도
+        최대 ~30초 재시도하므로, start_all.bat 으로 동시에 켜도 안전."""
         assert self.pw
         log.info("browser.cdp_connecting", url=cdp_url)
-        self.browser = await self.pw.chromium.connect_over_cdp(cdp_url)
+        last_exc: Optional[Exception] = None
+        for attempt in range(15):
+            try:
+                self.browser = await self.pw.chromium.connect_over_cdp(cdp_url)
+                last_exc = None
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                log.info("browser.cdp_waiting", attempt=attempt + 1, err=str(exc)[:80])
+                await asyncio.sleep(2)
+        if last_exc is not None:
+            raise RuntimeError(
+                f"Chrome 에 연결 실패 ({cdp_url}). "
+                f"scripts\\launch_chrome.ps1 또는 start_chrome.bat 으로 Chrome 을 먼저 띄우세요. "
+                f"원본 오류: {last_exc}"
+            )
         # 보통 첫 context 가 사용자가 보고 있는 창. 없으면 새로 만들기.
+        assert self.browser
         contexts = self.browser.contexts
         self.ctx = contexts[0] if contexts else await self.browser.new_context()
         self.is_cdp = True

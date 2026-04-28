@@ -103,10 +103,14 @@ class TelegramService:
         await update.message.reply_text(
             "⚡ HYPER 새로고침 모드 (진짜 Chrome + CDP)\n"
             "  사전: scripts\\launch_chrome.ps1 으로 진짜 Chrome 띄움\n"
-            "  /refresh             ← 인라인 버튼 메뉴 (즉시 / +1 / +2 / +3 / 좌석만 / 초고속)\n"
-            "  /refresh 1           ← 더보기 1회 (수동 입력)\n"
-            "  /refresh ! 좌석 2    ← 초고속 + 좌석만 + 더보기 2회\n"
-            "  ※ 더보기는 최대 3회 (그 이상은 좌석 놓침 빈번)\n"
+            "  /refresh             ← 인라인 버튼 메뉴\n"
+            "                          [⚡ 기본] [🔍📜📚 +더보기 1/2/3]\n"
+            "                          [🙏 간절합니다 / +1 / +2 / +3]\n"
+            "                          [🐢 일반 속도]\n"
+            "  /refresh 1           ← 더보기 1회 (좌석만 + 초고속, 기본값)\n"
+            "  /refresh 간절 2      ← 입석+좌석 + 더보기 2회\n"
+            "  /refresh 보통        ← 일반 속도\n"
+            "  ※ 기본 = 초고속(≈0.5초) + 좌석만, 더보기 최대 3\n"
             "  ※ 진행 알림은 5분마다, 잡히는 즉시 별도 알림\n"
             "\n"
             "  → 잡히면: 셀 클릭 + 예매 버튼 단일 JS 호출로 따닥 → 알림\n"
@@ -196,8 +200,9 @@ class TelegramService:
     async def cmd_refresh(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         """/refresh — HYPER 새로고침 모드.
 
-        인자 없이 보내면 인라인 버튼 메뉴가 나오고, 인자가 있으면 즉시 시작.
-        더보기는 최대 3회 (그 이상은 좌석 놓침이 많아 캡).
+        기본값: 초고속 + 좌석만.
+        입석+좌석 까지 잡으려면 메뉴에서 '🙏 간절합니다' 를 누르거나
+        인자에 '간절' / '입석' 단어를 넣어주세요.
         """
         if not _is_authorized(update.effective_chat.id):
             return
@@ -206,37 +211,42 @@ class TelegramService:
         # 인자 없으면 메뉴 띄움.
         if not a:
             self._default_chat_id = update.effective_chat.id
+            # callback_data 형식: rf:<aggr>:<expand>:<seat>
+            #   aggr: 1=초고속(기본) / 0=일반
+            #   expand: 0~3
+            #   seat: o=좌석만(기본) / s=좌석+입석
             kb = [
                 [
-                    InlineKeyboardButton("⚡ 즉시", callback_data="rf:0:0:s"),
-                    InlineKeyboardButton("🔍 더보기 1", callback_data="rf:0:1:s"),
-                    InlineKeyboardButton("📜 더보기 2", callback_data="rf:0:2:s"),
-                    InlineKeyboardButton("📚 더보기 3", callback_data="rf:0:3:s"),
+                    InlineKeyboardButton("⚡ 기본", callback_data="rf:1:0:o"),
+                    InlineKeyboardButton("🔍 +더보기 1", callback_data="rf:1:1:o"),
+                    InlineKeyboardButton("📜 +더보기 2", callback_data="rf:1:2:o"),
+                    InlineKeyboardButton("📚 +더보기 3", callback_data="rf:1:3:o"),
                 ],
                 [
-                    InlineKeyboardButton("💺 좌석만 즉시", callback_data="rf:0:0:o"),
-                    InlineKeyboardButton("💺 좌석만 +1", callback_data="rf:0:1:o"),
-                    InlineKeyboardButton("💺 좌석만 +2", callback_data="rf:0:2:o"),
-                    InlineKeyboardButton("💺 좌석만 +3", callback_data="rf:0:3:o"),
+                    InlineKeyboardButton("🙏 간절합니다", callback_data="rf:1:0:s"),
+                    InlineKeyboardButton("🙏 간절 +1", callback_data="rf:1:1:s"),
+                    InlineKeyboardButton("🙏 간절 +2", callback_data="rf:1:2:s"),
+                    InlineKeyboardButton("🙏 간절 +3", callback_data="rf:1:3:s"),
                 ],
                 [
-                    InlineKeyboardButton("🔥 초고속 즉시", callback_data="rf:1:0:s"),
-                    InlineKeyboardButton("🔥 초고속 +1", callback_data="rf:1:1:s"),
+                    InlineKeyboardButton("🐢 일반 속도 (탐지 걱정 시)", callback_data="rf:0:0:o"),
                 ],
             ]
             await update.message.reply_text(
-                "어떤 모드로 시작할까요?\n"
-                "  · 즉시 = 초기 화면만 스캔 (가장 빠름, 좁은 시간대)\n"
-                "  · 더보기 N = F5 마다 더보기 N번 펼치고 스캔 (넓은 시간대)\n"
-                "  · 좌석만 = 입석+좌석 무시\n"
-                "  · 초고속 = ≈0.5초마다 F5 (탐지 위험 ↑)",
+                "어떤 모드로 시작할까요? (기본 = 초고속 + 좌석만)\n"
+                "  · 기본: F5 따닥 + 좌석만 잡음 (입석+좌석 무시)\n"
+                "  · +더보기 N: F5 후 더보기 N번 자동 펼치고 스캔 (시간대 확장)\n"
+                "  · 🙏 간절합니다: 좌석 다 놓쳐도 입석+좌석 잡음 (절박 시)\n"
+                "  · 🐢 일반 속도: 탐지 걱정될 때 (≈1초 간격)",
                 reply_markup=InlineKeyboardMarkup(kb),
             )
             return
 
-        # 인자 직접 파싱 (기존 동작 유지) — expand 는 0~3 으로 캡.
-        aggressive = "!" in a
-        allow_standing = not ("좌석" in a and "입석" not in a)
+        # 인자 직접 파싱 — 기본 초고속 + 좌석만.
+        # '간절' 또는 '입석' 단어 있으면 입석+좌석 포함.
+        # '보통' 또는 '느림' 단어 있으면 일반 속도.
+        aggressive = not any(t in a for t in ("보통", "느림", "느리게"))
+        allow_standing = any(t in a for t in ("간절", "절박", "입석"))
         expand_count = 0
         for tok in a:
             try:

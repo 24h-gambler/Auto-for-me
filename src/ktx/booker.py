@@ -918,6 +918,19 @@ _BLOCK_CHECK_JS = """
 """
 
 
+# 결과 행이 실제로 DOM 에 그려졌는지 확인 — Vue/React SPA 라 domcontentloaded
+# 시점엔 행이 없을 수 있음. 스캔 직전에 이게 truthy 가 될 때까지 잠깐 대기.
+_ROWS_RENDERED_JS = """
+() => {
+  const links = document.querySelectorAll('a');
+  for (const a of links) {
+    if (a.querySelector('p.txt_ch, .tck_etc_use')) return true;
+  }
+  return false;
+}
+"""
+
+
 # F5 후 더보기 N회 클릭 — 더 넓은 시간대를 한 번에 스캔하기 위함.
 _LOAD_MORE_JS = """
 () => {
@@ -1038,7 +1051,15 @@ async def refresh_and_click_loop(
             await recover_from_block(page, marker="-8003/매크로", notify=notify, job_id=job.id)
             continue
 
-        # 2.5) 더보기 N회 펼치기 (사용자 옵션)
+        # 2.5) Vue/React 가 열차 행을 실제로 그릴 때까지 대기. 보통 100~500ms.
+        # 안 그러면 "행 없음 = 다 매진" 으로 잘못 판단해서 좌석을 놓침.
+        try:
+            await page.wait_for_function(_ROWS_RENDERED_JS, timeout=2500)
+        except Exception:
+            # 2.5초 안에 안 뜨면 그냥 진행 (아예 결과 없는 경우 등)
+            pass
+
+        # 2.7) 더보기 N회 펼치기 (사용자 옵션) — 각 클릭 후 새 행이 그려질 때까지 대기.
         for _ in range(expand_count):
             try:
                 clicked_more = await page.evaluate(_LOAD_MORE_JS)
@@ -1046,7 +1067,12 @@ async def refresh_and_click_loop(
                 clicked_more = False
             if not clicked_more:
                 break
-            await asyncio.sleep(0.15)   # DOM 업데이트 짧게 대기
+            # 새 행이 추가되는 데 대기 — 단순 sleep 보다 정확.
+            try:
+                await page.wait_for_function(_ROWS_RENDERED_JS, timeout=1500)
+            except Exception:
+                pass
+            await asyncio.sleep(0.1)   # 안전 여유
 
         # 3) 스캔 + 클릭 (단일 JS 호출 — 가장 빠름)
         try:

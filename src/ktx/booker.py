@@ -728,23 +728,176 @@ async def _hold_first_class_loop(
 
 
 # ---------------------------------------------------------------------------
+# 사용자가 직접 검색까지 진행한 페이지를 받아 새로고침 + 클릭 반복하는 모드
+# ---------------------------------------------------------------------------
+
+async def _find_user_results_page() -> Optional[Page]:
+    """봇의 브라우저 컨텍스트에서 결과 페이지(또는 코레일 페이지)를 찾는다.
+    사용자가 직접 검색까지 한 탭을 가져오는 게 핵심."""
+    if POOL.ctx is None:
+        return None
+    pages = list(POOL.ctx.pages)
+    # 우선순위: 결과 페이지 URL 힌트 포함 > 그 외 코레일 페이지 > 마지막 페이지.
+    for p in pages:
+        try:
+            if S.RESULT_PAGE_URL_HINT in p.url:
+                return p
+        except Exception:
+            continue
+    for p in pages:
+        try:
+            if "korail.com" in p.url:
+                return p
+        except Exception:
+            continue
+    return pages[-1] if pages else None
+
+
+async def refresh_and_click_loop(
+    job, notify: Callable[..., Awaitable[None]],
+) -> dict[str, Any]:
+    """사용자가 검색까지 마친 페이지에서, 새로고침을 반복하며
+    매진 아닌 행이 보이면 즉시 클릭해 결제 페이지까지 진입.
+
+    이 모드의 장점:
+      - 자동화로 로그인/검색을 안 해서 매크로 탐지에 거의 안 걸림
+      - 사용자가 검색 조건을 직접 골라 정확함
+      - 봇은 단순한 "새로고침 + 클릭" 만 함
+    """
+    page = await _find_user_results_page()
+    if page is None:
+        await notify(
+            f"❌ [{job.id}] 봇 브라우저에 코레일 페이지가 없습니다.\n"
+            f"봇 chromium 창에서 직접 로그인 → 검색 결과 페이지까지 이동한 뒤 다시 /refresh."
+        )
+        raise RuntimeError("no korail page in browser context")
+
+    await notify(
+        f"🔁 [{job.id}] 새로고침 모드 시작\n"
+        f"   대상 페이지: {page.url}\n"
+        f"   주기: 15~30초 (랜덤). 매진 아닌 행 발견 시 즉시 클릭."
+    )
+
+    aggressive = bool(job.params.get("aggressive", False))
+    base_lo, base_hi = (8, 18) if aggressive else (15, 30)
+    deadline = CFG.ktx.poll.max_total_hours * 3600
+    started = asyncio.get_event_loop().time()
+    attempt = 0
+    last_ping = started
+
+    while not job.cancel_event.is_set():
+        attempt += 1
+        now = asyncio.get_event_loop().time()
+        if now - started > deadline:
+            raise TimeoutError("새로고침 모드가 max_total_hours 를 초과했습니다.")
+
+        # 1) 차단 페이지 검사
+        marker = await detect_block(page)
+        if marker:
+            await recover_from_block(page, marker=marker, notify=notify, job_id=job.id)
+            continue
+
+        # 2) 매진 아닌 가격 셀 찾기 → 클릭
+        clicked_cell = None
+        try:
+            cells = await page.locator(S.ROW_PRICE_CELL).all()
+            for cell in cells:
+                try:
+                    txt = (await cell.inner_text()).strip()
+                except Exception:
+                    continue
+                if "매진" in txt and "임박" not in txt:
+                    continue
+                if "원" not in txt:
+                    continue
+                # 가격 셀 발견 — 클릭 시도.
+                try:
+                    await cell.scroll_into_view_if_needed()
+                    await human_idle_micro()
+                    await cell.click(delay=80)
+                    clicked_cell = txt
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("refresh.click_failed", err=str(exc))
+                    continue
+        except Exception as exc:  # noqa: BLE001
+            log.warning("refresh.scan_failed", err=str(exc))
+
+        if clicked_cell:
+            await human_pause()
+            shot = await _capture_screenshot(page, f"clicked-{job.id}")
+            await notify(
+                f"🎯 [{job.id}] 매진 아닌 좌석 클릭됨!\n"
+                f"   셀 내용: {clicked_cell[:60]}\n"
+                f"   결제 페이지까지 자동 진입 시도합니다.",
+                photo_path=str(shot),
+            )
+            # 결제 페이지까지 진입 시도 (PROCEED → 좌석 → PAY 순)
+            reached = await navigate_to_payment(page, notify=notify, job_id=job.id)
+            if reached:
+                shot2 = await _capture_screenshot(page, f"payment-{job.id}")
+                await notify(
+                    f"✅ [{job.id}] 결제 페이지 도달!\n"
+                    f"화면에서 결제수단 선택 → '결제하기' 클릭. (좌석 ≈10분 유지)",
+                    photo_path=str(shot2),
+                )
+                return {"reached_payment": True, "attempts": attempt, "url": page.url}
+            else:
+                shot3 = await _capture_screenshot(page, f"after-click-{job.id}")
+                await notify(
+                    f"⚠️ [{job.id}] 클릭은 됐지만 결제 페이지까지 자동 진입 못함.\n"
+                    f"화면에서 직접 다음 단계 진행해주세요. 좌석 ≈10분 유지.",
+                    photo_path=str(shot3),
+                )
+                return {"reached_payment": False, "attempts": attempt, "url": page.url}
+
+        # 3) 진행 알림 (10회마다)
+        if attempt % 10 == 0 or now - last_ping > 120:
+            await notify(f"⏳ [{job.id}] {attempt}회차 새로고침 — 아직 매진. 계속 시도 중.")
+            last_ping = now
+
+        # 4) 랜덤 대기 후 새로고침
+        delay = random.uniform(base_lo, base_hi)
+        try:
+            await asyncio.wait_for(job.cancel_event.wait(), timeout=delay)
+            raise asyncio.CancelledError()
+        except asyncio.TimeoutError:
+            pass
+
+        try:
+            await page.reload(wait_until="domcontentloaded")
+            await human_arrival_pause()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("refresh.reload_failed", err=str(exc))
+            await asyncio.sleep(5)
+
+    raise asyncio.CancelledError("user cancelled refresh loop")
+
+
+# ---------------------------------------------------------------------------
 # Job entrypoint
 # ---------------------------------------------------------------------------
 
 async def run_ktx_job(job, notify: Callable[..., Awaitable[None]]) -> dict[str, Any]:
     p = job.params
-    origin: str = p["origin"]
-    destination: str = p["destination"]
-    date: str = p["date"]
-    time_str: str = p["time"]
-    window: int = int(p.get("window_minutes") or 120)
     strategy: str = p.get("seat_class_strategy") or "any"
+    # refresh 전략은 사용자가 직접 검색해뒀으므로 출발/도착/일시 없어도 OK.
+    origin: str = p.get("origin") or ""
+    destination: str = p.get("destination") or ""
+    date: str = p.get("date") or ""
+    time_str: str = p.get("time") or ""
+    window: int = int(p.get("window_minutes") or 120)
     preferred_cols: list[str] = p.get("preferred_columns") or ["A", "D"]
     hold_minutes: int = int(p.get("first_class_hold_minutes") or 8)
     # 빠른 폴링 모드 — 작업 단위로 toggle 가능. 미지정 시 config 따름.
     aggressive: bool = bool(p.get("aggressive", CFG.ktx.poll.aggressive))
 
     await POOL.start()
+
+    # refresh 전략은 사용자가 직접 검색까지 한 페이지를 사용 — login/page 새로 안 만든다.
+    if strategy == "refresh":
+        return await refresh_and_click_loop(job, notify)
+
     page = await POOL.new_page()
     cadence = "🔥 빠른 폴링 (≈4초 간격)" if aggressive else "🐢 일반 폴링 (≈8~90초 백오프)"
     await notify(

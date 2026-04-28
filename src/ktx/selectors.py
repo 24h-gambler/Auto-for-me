@@ -75,13 +75,19 @@ ARRV_INPUT = ARRV_OPEN_BTN
 DATE_INPUT = DATE_OPEN_BTN
 TIME_SELECT = TIME_PICKER
 
-# 결과 테이블 — 코레일은 id 가 변경된 적 있어 후보 둘 다 매칭.
+# ── 결과 페이지 (새 사이트) ─────────────────────────────────────────
+# https://www.korail.com/ticket/search/list
+RESULT_PAGE_URL_HINT = "/ticket/search/list"
+# 결과 행 — 새 사이트는 table 외에 li/div 기반일 수도 있어 후보 넓게.
 RESULT_ROWS = (
-    "table#tbl_search tbody tr, "
-    "table.tbl_l tbody tr, "
-    "tbody#tbody tr, "
-    "table[summary*='조회'] tbody tr"
+    "table tbody tr, "
+    "ul.train_list > li, ul.list > li, "
+    "div.train_item, div[class*='train_row'], "
+    "table#tbl_search tbody tr, table.tbl_l tbody tr"
 )
+# 가격이 있는 셀 = 예약 가능 (예 "20,100원"). "매진"과 "-"는 제외.
+ROW_PRICE_CELL = "td:has-text('원'):not(:text-is('매진'))"
+ROW_SOLD_OUT_CELL = "td:text-is('매진'), td:text-is('-')"
 ROW_TRAIN_NO = "td:nth-child(2)"
 ROW_DEPT_TIME = "td:nth-child(3)"
 ROW_ARRV_TIME = "td:nth-child(4)"

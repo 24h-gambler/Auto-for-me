@@ -60,6 +60,7 @@ class TelegramService:
         self.app.add_handler(CommandHandler("captcha", self.cmd_captcha))
         self.app.add_handler(CommandHandler("ktx", self.cmd_ktx))
         self.app.add_handler(CommandHandler("book", self.cmd_book))
+        self.app.add_handler(CommandHandler("refresh", self.cmd_refresh))
         self.app.add_handler(CommandHandler("coupang", self.cmd_coupang))
         self.app.add_handler(CommandHandler("watch", self.cmd_watch))
         self.app.add_handler(CommandHandler("unwatch", self.cmd_unwatch))
@@ -99,7 +100,9 @@ class TelegramService:
     async def cmd_help(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(
             "🚄 KTX 예매\n"
-            "  /book 서울 부산 2026-05-10 09:00 120     ← 빠른 폴링·아무 좌석 (추천)\n"
+            "  /refresh                                 ← 사용자가 검색까지 직접 한 페이지를 봇이 새로고침+클릭 (매크로 회피, 추천)\n"
+            "  /refresh !                               ← 위 모드의 빠른 버전 (8~18초)\n"
+            "  /book 서울 부산 2026-05-10 09:00 120     ← 봇이 처음부터 자동 (탐지 위험)\n"
             "  /ktx  서울 부산 2026-05-10 09:00 120 !   ← /book 과 동일\n"
             "  /ktx  서울 부산 2026-05-10 09:00 120     ← 보통 폴링\n"
             "  마지막 숫자는 ±분(시간 폭)\n"
@@ -178,6 +181,29 @@ class TelegramService:
         job = self.manager.submit("ktx", params, chat_id=update.effective_chat.id)
         await update.message.reply_text(
             f"등록됨 [{job.id}] · {'🔥 빠른 폴링' if aggressive else '🐢 일반 폴링'}"
+        )
+
+    async def cmd_refresh(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """/refresh — 매크로 회피 모드.
+        사용자가 봇 chromium 창에서 직접 로그인 + 검색까지 한 페이지를
+        그대로 받아, 봇은 새로고침 + 매진 아닌 행 클릭만 자동화.
+
+        끝에 ! 붙이면 더 빠른 새로고침 (8~18초). 기본은 15~30초.
+        """
+        if not _is_authorized(update.effective_chat.id):
+            return
+        a = ctx.args
+        aggressive = a and a[-1] == "!"
+        params = {
+            "seat_class_strategy": "refresh",
+            "aggressive": bool(aggressive),
+        }
+        self._default_chat_id = update.effective_chat.id
+        job = self.manager.submit("ktx", params, chat_id=update.effective_chat.id)
+        await update.message.reply_text(
+            f"🔁 [{job.id}] 새로고침 모드 시작.\n"
+            f"봇 chromium 창에서 검색 결과 페이지가 떠 있어야 합니다.\n"
+            f"매진 아닌 좌석 발견 시 즉시 클릭 → 결제 페이지로."
         )
 
     async def cmd_book(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:

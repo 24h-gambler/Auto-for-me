@@ -100,6 +100,7 @@ class TelegramService:
     async def cmd_help(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(
             "⚡ HYPER 새로고침 모드 (사용자가 직접 로그인+검색 → 봇이 F5 따닥)\n"
+            "  사전: scripts\\launch_chrome.ps1 으로 진짜 Chrome 을 띄워야 함\n"
             "  /refresh             ← 좌석+입석 둘 다 (≈1초마다 F5)\n"
             "  /refresh !           ← 초고속 (≈0.5초마다 F5, 탐지 위험 ↑)\n"
             "  /refresh 좌석        ← 좌석만, 입석 무시\n"

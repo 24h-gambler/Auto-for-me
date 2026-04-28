@@ -732,12 +732,18 @@ async def _hold_first_class_loop(
 # ---------------------------------------------------------------------------
 
 async def _find_user_results_page() -> Optional[Page]:
-    """봇의 브라우저 컨텍스트에서 결과 페이지(또는 코레일 페이지)를 찾는다.
-    사용자가 직접 검색까지 한 탭을 가져오는 게 핵심."""
-    if POOL.ctx is None:
+    """결과 페이지 (또는 코레일 페이지) 찾기.
+    CDP 모드면 사용자 진짜 Chrome 의 모든 컨텍스트 / 모든 탭을 검사."""
+    pages: list[Page] = []
+    # CDP 모드: 모든 컨텍스트의 모든 페이지 합치기
+    if POOL.is_cdp and POOL.browser is not None:
+        for ctx in POOL.browser.contexts:
+            pages.extend(ctx.pages)
+    elif POOL.ctx is not None:
+        pages.extend(POOL.ctx.pages)
+    if not pages:
         return None
-    pages = list(POOL.ctx.pages)
-    # 우선순위: 결과 페이지 URL 힌트 포함 > 그 외 코레일 페이지 > 마지막 페이지.
+    # 우선순위: 결과 페이지 URL 힌트 > 그 외 코레일 페이지 > 마지막
     for p in pages:
         try:
             if S.RESULT_PAGE_URL_HINT in p.url:
@@ -750,7 +756,7 @@ async def _find_user_results_page() -> Optional[Page]:
                 return p
         except Exception:
             continue
-    return pages[-1] if pages else None
+    return pages[-1]
 
 
 async def _scan_and_reserve(

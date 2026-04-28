@@ -50,6 +50,33 @@ cp config.example.yaml config.yaml
 python -m src.main
 ```
 
+## 🥇 추천 워크플로 — 진짜 Chrome + CDP 연결 (anti-bot 회피)
+
+새 코레일 사이트는 Playwright 가 띄운 chromium 을 즉시 차단합니다 ("통신중 에러" 등).
+해결: 봇이 chromium 을 직접 띄우지 않고 사용자가 미리 띄운 진짜 Chrome 에 붙는다.
+
+```powershell
+# 1) 진짜 Chrome 을 디버깅 포트 + 별도 프로필로 띄움 (코레일 자동으로 열림)
+PowerShell -ExecutionPolicy Bypass -File scripts\launch_chrome.ps1
+
+# 2) 띄워진 Chrome 에서 직접:
+#    - 코레일 로그인
+#    - https://www.korail.com/ticket/search/general 에서 검색
+
+# 3) .env 에 한 줄 추가
+#    CHROME_CDP_URL=http://127.0.0.1:9222
+
+# 4) 봇 가동
+python -m src.main
+
+# 5) 텔레그램에서
+#    /refresh           ← 1초 간격 F5+클릭
+#    /refresh !         ← 0.5초 간격 (초고속)
+```
+
+봇은 사용자 Chrome 의 결과 페이지 탭을 찾아 그 위에서 새로고침 + 매진 아닌 셀 클릭
++ 예매 버튼 클릭을 자동 수행합니다. 사용자가 평소 쓰던 Chrome 이라 탐지 거의 0.
+
 ## 💸 100% 무료로 KTX 만 돌리기 (Anthropic API 불필요)
 
 자유채팅 / 쿠팡 분석에만 Claude API 가 필요합니다. **KTX 예매는 슬래시 명령으로 직접

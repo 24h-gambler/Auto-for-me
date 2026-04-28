@@ -28,6 +28,12 @@ class Env(BaseSettings):
     # 공백/주석 잔재가 들어가도 안전하게 동작하도록 strip 처리는 사용처에서.
     proxy_url: str = Field("", alias="PROXY_URL")
 
+    # CHROME_CDP_URL 가 설정되면 봇은 chromium 을 직접 띄우지 않고,
+    # 사용자가 미리 띄운 진짜 Chrome 에 connect_over_cdp 로 붙는다.
+    # 예: http://127.0.0.1:9222
+    # 이 모드는 강한 anti-bot (코레일 신 사이트 등) 회피에 필수.
+    chrome_cdp_url: str = Field("", alias="CHROME_CDP_URL")
+
     orchestrator_model: str = Field("claude-opus-4-7", alias="ORCHESTRATOR_MODEL")
     analyzer_model: str = Field("claude-sonnet-4-6", alias="ANALYZER_MODEL")
 

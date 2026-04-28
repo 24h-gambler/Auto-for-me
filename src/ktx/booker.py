@@ -131,61 +131,127 @@ async def ensure_logged_in(page: Page, *, notify=None) -> None:
 # Search
 # ---------------------------------------------------------------------------
 
+async def _select_station(page: Page, *, open_btn_sel: str, name: str) -> None:
+    """역 팝업 열고 name 에 해당하는 역 선택 후 확인."""
+    await page.click(open_btn_sel)
+    await human_pause()
+    # 팝업이 뜰 때까지 잠깐 대기
+    try:
+        await page.wait_for_selector(
+            S.STATION_SEARCH_INPUT + ", " + S.STATION_LIST_ITEM_TPL.format(name=name),
+            timeout=5000,
+        )
+    except Exception:
+        pass
+    # 1) 검색 input 이 있으면 역 이름 타이핑 — 후보 좁힘.
+    try:
+        si = page.locator(S.STATION_SEARCH_INPUT).first
+        if await si.count():
+            await si.fill("")
+            await si.type(name, delay=80)
+            await human_pause()
+    except Exception:
+        pass
+    # 2) 역 이름 매칭하는 항목 클릭 — 가장 짧게 매칭되는 것을 우선.
+    item_sel = S.STATION_LIST_ITEM_TPL.format(name=name)
+    try:
+        item = page.locator(item_sel).first
+        await item.scroll_into_view_if_needed()
+        await item.click(delay=80)
+        await human_pause()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("station.click_failed", name=name, err=str(exc))
+        raise
+    # 3) 확인 버튼 — 있으면 클릭 (어떤 팝업은 항목 클릭이 곧 확인).
+    try:
+        confirm = page.locator(S.STATION_CONFIRM_BTN).first
+        if await confirm.count():
+            await confirm.click(delay=80)
+            await human_pause()
+    except Exception:
+        pass
+
+
+async def _select_date(page: Page, date: str) -> None:
+    """캘린더 팝업 열고 date(YYYY-MM-DD) 로 이동 후 일자 클릭."""
+    await page.click(S.DATE_OPEN_BTN)
+    await human_pause()
+    try:
+        await page.wait_for_selector(S.DATE_PICKER, timeout=5000)
+    except Exception:
+        pass
+    yyyy, mm, dd = date.split("-")
+    target_label = f"{yyyy}. {mm}."
+    # 캘린더가 표시 중인 월이 target 보다 빠르면 next 클릭, 늦으면 prev.
+    for _ in range(24):  # 최대 24회(=2년) 안전장치
+        try:
+            cur = (await page.locator(S.DATE_PICKER_MONTH_TXT).first.inner_text()).strip()
+        except Exception:
+            cur = ""
+        if cur == target_label:
+            break
+        # 정렬 비교
+        cur_norm = cur.replace(" ", "").rstrip(".")
+        tgt_norm = target_label.replace(" ", "").rstrip(".")
+        try:
+            if cur_norm < tgt_norm:
+                await page.click(S.DATE_PICKER_NEXT)
+            else:
+                await page.click(S.DATE_PICKER_PREV)
+        except Exception:
+            break
+        await asyncio.sleep(0.3)
+
+    day_sel = S.DATE_DAY_TPL.format(day=str(int(dd)))
+    await page.click(day_sel, delay=80)
+    await human_pause()
+
+
+async def _select_hour(page: Page, time_str: str) -> None:
+    """시간 picker 에서 HH:MM 의 HH 시 클릭. Slick 캐러셀에서 안 보이면 next 로 스크롤."""
+    hour = str(int(time_str.split(":")[0]))
+    sel = S.TIME_HOUR_TPL.format(hour=hour)
+    for _ in range(8):
+        try:
+            loc = page.locator(sel).first
+            if await loc.count():
+                await loc.scroll_into_view_if_needed()
+                await loc.click(delay=80)
+                await human_pause()
+                return
+        except Exception:
+            pass
+        # 안 보이면 캐러셀 next
+        try:
+            nxt = page.locator(S.TIME_PICKER_NEXT).first
+            if await nxt.count():
+                await nxt.click(delay=80)
+                await asyncio.sleep(0.2)
+            else:
+                break
+        except Exception:
+            break
+    log.warning("time.hour_not_found", hour=hour)
+
+
 async def search_trains(
     page: Page, *, origin: str, destination: str, date: str, time_str: str
 ) -> list[dict[str, Any]]:
+    """새 korail.com 검색 흐름 — 출발역→도착역→날짜→시간→조회."""
     await page.goto(S.SEARCH_URL, wait_until="domcontentloaded")
     await human_pause()
     await dismiss_popups(page)
-    await human_type(page, S.DEPT_INPUT, origin)
-    await human_type(page, S.ARRV_INPUT, destination)
 
-    # 날짜 입력 — 코레일은 두 가지 레이아웃을 혼용합니다:
-    #   a) hidden text input  : <input name="txtGoDate" value="YYYYMMDD">
-    #   b) 3개 select         : selGoYear / selGoMonth / selGoDay
-    # 어느 쪽이 살아있든 동작하도록 둘 다 시도합니다.
-    yyyymmdd = date.replace("-", "")
-    yyyy, mm, dd = yyyymmdd[:4], yyyymmdd[4:6], yyyymmdd[6:8]
+    await _select_station(page, open_btn_sel=S.DEPT_OPEN_BTN, name=origin)
+    await _select_station(page, open_btn_sel=S.ARRV_OPEN_BTN, name=destination)
+    await _select_date(page, date)
+    await _select_hour(page, time_str)
 
-    await page.evaluate(
-        """
-        (args) => {
-          const [val, sel] = args;
-          const fire = (el) => {
-            el.dispatchEvent(new Event('input',  { bubbles: true }));
-            el.dispatchEvent(new Event('change', { bubbles: true }));
-          };
-          // (a) 단일 hidden input
-          document.querySelectorAll(sel).forEach(el => { el.value = val; fire(el); });
-        }
-        """,
-        [yyyymmdd, S.DATE_INPUT],
-    )
-    # (b) year/month/day select 들 — 있을 때만 적용
-    for sel, val in (
-        ("select[name='selGoYear']", yyyy),
-        ("select[name='selGoMonth']", mm),
-        ("select[name='selGoDay']", dd),
-    ):
-        try:
-            if await page.locator(sel).count():
-                await page.select_option(sel, value=val)
-        except Exception:
-            pass
-
-    hh = time_str.split(":")[0].zfill(2)
-    for sel, val in (
-        (S.TIME_SELECT, hh + "0000"),
-        ("select[name='selGoHour']", hh),
-    ):
-        try:
-            if await page.locator(sel).count():
-                await page.select_option(sel, value=val)
-        except Exception:
-            pass
-
-    await human_click(page, S.SEARCH_BTN)
-    await page.wait_for_selector(S.RESULT_ROWS, timeout=20000)
+    await page.click(S.SEARCH_BTN)
+    try:
+        await page.wait_for_selector(S.RESULT_ROWS, timeout=20000)
+    except Exception:
+        log.warning("search.no_results_selector")
     await dismiss_popups(page)
 
     rows = await page.locator(S.RESULT_ROWS).all()

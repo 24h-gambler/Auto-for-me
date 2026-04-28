@@ -18,30 +18,62 @@ PW_INPUT = "input[name='password'], input#password, input[type='password']"
 LOGIN_BTN = "button[type='submit'], a.btn_login, button:has-text('로그인')"
 
 # ── 검색 폼 — 새 사이트는 팝업 기반 ─────────────────────────────────
-# 옛날처럼 input 에 타이핑하는 게 아니라, 버튼 → 팝업 → 역 선택 흐름.
-# 사용자가 확인해준 출발역 팝업 트리거 버튼:
+# 출발/도착역 트리거 (동일 class, 안의 <span class="blind"> 텍스트로 구분):
 #   <a class="btn_pop btn_end btn_pop-open"><span class="blind">출발역 선택</span></a>
-DEPT_OPEN_BTN = "a.btn_pop-open:has(span:has-text('출발역')), .btn_pop:has-text('출발역 선택')"
-ARRV_OPEN_BTN = "a.btn_pop-open:has(span:has-text('도착역')), .btn_pop:has-text('도착역 선택')"
-# 팝업 내 역 검색 input + 역 클릭 + 확인 버튼 — HTML 받으면 갱신.
-STATION_SEARCH_INPUT = "input[type='search'], input[placeholder*='역']"
-STATION_LIST_ITEM = "li[data-station], li.station_item, button.station, a.station"
-STATION_CONFIRM_BTN = "button:has-text('확인'), a:has-text('확인'), button:has-text('선택')"
+DEPT_OPEN_BTN = "a.btn_pop-open:has(span.blind:has-text('출발역'))"
+ARRV_OPEN_BTN = "a.btn_pop-open:has(span.blind:has-text('도착역'))"
 
-# 날짜 / 시간 / 검색 버튼 — HTML 받으면 갱신.
-DATE_OPEN_BTN = "a.btn_pop-open:has-text('출발일'), button:has-text('출발일')"
-TIME_OPEN_BTN = "a.btn_pop-open:has-text('시간'), button:has-text('시간')"
-SEARCH_BTN = (
-    "button.btn_search, a.btn_search, "
-    "button:has-text('조회하기'), button:has-text('조회'), "
-    "button:has-text('승차권 검색'), button[type='submit']"
+# 역 선택 팝업 — 정확한 HTML 미확인. 보통 검색 input + 역 목록 + 확인 버튼.
+# 흔한 패턴들에 대응하도록 후보 넓게.
+STATION_SEARCH_INPUT = (
+    "input[type='search'], input[type='text'][placeholder*='역'], "
+    "input[placeholder*='검색'], .layer_pop input[type='text']"
+)
+STATION_LIST_ITEM_TPL = (
+    "li:has-text('{name}'), button:has-text('{name}'), a:has-text('{name}'), "
+    ".layer_pop *:has-text('{name}'):not(:has(*))"
+)
+STATION_CONFIRM_BTN = (
+    "button:has-text('확인'), a:has-text('확인'), "
+    "button:has-text('선택'), a:has-text('선택'), "
+    ".layer_pop .btn_ok, .layer_pop .btn_confirm"
 )
 
-# 옛 site 호환을 위한 alias — 기존 booker 코드가 참조 중.
+# 출발일 트리거: <a href="#none" class="btn_pop btn_d-day" title="출발일"></a>
+DATE_OPEN_BTN = "a.btn_pop.btn_d-day, a.btn_pop[title='출발일']"
+
+# 캘린더 — <p class="date">2026. 04.</p> 포맷, td.disabled 는 클릭 불가.
+DATE_PICKER = ".datepicker"
+DATE_PICKER_MONTH_TXT = ".datepicker p.date"
+DATE_PICKER_PREV = (
+    ".datepicker .btn_prev, .datepicker .prev, "
+    ".datepicker button[class*='prev'], .datepicker a[class*='prev']"
+)
+DATE_PICKER_NEXT = (
+    ".datepicker .btn_next, .datepicker .next, "
+    ".datepicker button[class*='next'], .datepicker a[class*='next']"
+)
+# 일자 셀 (활성): td:not(.disabled) > a > span.day. day 텍스트로 클릭.
+DATE_DAY_TPL = ".datepicker td:not(.disabled) a:has(span.day:text-is('{day}'))"
+
+# 시간 picker (Slick 캐러셀):
+#  <div class="timeSelect">
+#    <li><span class="disabled">00시</span></li>     ← 비활성
+#    <li class="current"><a>21시</a></li>            ← 선택됨
+#    <li><a>22시</a></li>                            ← 선택 가능
+TIME_PICKER = ".timeSelect"
+TIME_PICKER_PREV = ".timeSelect .slick-prev"
+TIME_PICKER_NEXT = ".timeSelect .slick-next"
+TIME_HOUR_TPL = ".timeSelect li a:text-is('{hour}시')"
+
+# 열차 조회 버튼: <button type="button" class="btn_lookup">열차 조회</button>
+SEARCH_BTN = "button.btn_lookup, button:has-text('열차 조회'), button:has-text('조회')"
+
+# ── 옛 site 호환을 위한 alias — booker 의 기존 코드가 참조 중. ──────
 DEPT_INPUT = DEPT_OPEN_BTN
 ARRV_INPUT = ARRV_OPEN_BTN
 DATE_INPUT = DATE_OPEN_BTN
-TIME_SELECT = TIME_OPEN_BTN
+TIME_SELECT = TIME_PICKER
 
 # 결과 테이블 — 코레일은 id 가 변경된 적 있어 후보 둘 다 매칭.
 RESULT_ROWS = (

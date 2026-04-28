@@ -991,31 +991,50 @@ async def refresh_and_click_loop(
     consecutive_errors = 0
 
     async def _try_finalize(result: dict[str, Any], reserve_clicked: bool) -> dict[str, Any]:
-        """좌석 잡혔다 — 알림 + 결제 페이지까지 진입."""
-        shot = await _capture_screenshot(page, f"hit-{job.id}")
+        """좌석 잡혔다 — 비상 알림 연속 발사 + 결제 페이지까지 진입."""
         kind_kr = "좌석" if result["kind"] == "seat" else "입석+좌석"
+
+        # ===== 🚨 비상 알림 연속 발사 (Telegram 이 batch 처리 안 하도록 약간 간격) =====
+        await notify(f"🚨🚨🚨 [{job.id}] 비상!! 좌석 잡았습니다!! 🚨🚨🚨")
+        await asyncio.sleep(0.4)
         await notify(
-            f"🔥🔥 [{job.id}] 잡았습니다! ({kind_kr})\n"
-            f"   {result['text']}\n"
-            f"   예매 버튼 {'✅ 클릭됨' if reserve_clicked else '⚠️ 못 찾음'}\n"
-            f"   결제 페이지 진입 시도 중...",
+            f"⚠️⚠️⚠️ 빨리 예매하세요!!\n"
+            f"   {kind_kr} — {result['text']}\n"
+            f"   예매 버튼 {'✅ 클릭됨' if reserve_clicked else '⚠️ 못 찾음'}"
+        )
+        await asyncio.sleep(0.4)
+        shot = await _capture_screenshot(page, f"hit-{job.id}")
+        await notify(
+            f"🔥🔥🔥 결제 페이지 진입 시도 중...\n"
+            f"⏰ 좌석 유지 시간 ≈10분. PC 의 Chrome 창으로 즉시 이동!",
             photo_path=str(shot),
         )
+
         # navigate_to_payment 가 다음 단계 (좌석/승객/결제) 진행
         reached = await navigate_to_payment(page, notify=notify, job_id=job.id)
         if reached:
             shot2 = await _capture_screenshot(page, f"payment-{job.id}")
+            # 결제 페이지 도달 — 또 한 번 비상 알림.
             await notify(
-                f"✅ [{job.id}] 결제 페이지 도달!\n"
-                f"PC chromium 화면에서 결제수단 선택 → '결제하기'. (좌석 ≈10분 유지)",
+                f"✅✅✅ [{job.id}] 결제 페이지 도달!! 지금 바로!!",
+            )
+            await asyncio.sleep(0.3)
+            await notify(
+                f"💳💳💳 카드 선택 → '결제하기' 클릭!!\n"
+                f"⏰ 시간 가고 있습니다!! Chrome 창으로!!",
                 photo_path=str(shot2),
             )
             return {"reached_payment": True, "attempts": attempt, "kind": result["kind"]}
+
         shot3 = await _capture_screenshot(page, f"stuck-{job.id}")
         dump = await _dump_html(page, f"stuck-{job.id}")
         await notify(
-            f"⚠️ [{job.id}] 좌석 잡았는데 결제 페이지 자동 진입 실패.\n"
-            f"PC 화면에서 직접 다음 단계 진행. 좌석 ≈10분 유지.\n"
+            f"⚠️⚠️⚠️ [{job.id}] 좌석 잡았는데 결제 자동 진입 실패!!"
+        )
+        await asyncio.sleep(0.3)
+        await notify(
+            f"🚨 PC Chrome 으로 즉시 가서 직접 다음 단계 진행하세요!!\n"
+            f"좌석 ≈10분 유지. 빨리!!\n"
             f"덤프: {dump.name}",
             photo_path=str(shot3),
         )
@@ -1095,8 +1114,8 @@ async def refresh_and_click_loop(
 
             return await _try_finalize(result, reserve_clicked)
 
-        # 5) 진행 알림 — 5분에 한 번만 (스팸 방지). 잡힘 알림은 즉시.
-        if now - last_ping > 300:
+        # 5) 진행 알림 — 15분에 한 번만 (스팸 방지). 잡힘 알림은 즉시.
+        if now - last_ping > 900:
             elapsed_min = int((now - started) / 60)
             await notify(
                 f"⚡ [{job.id}] {attempt}회차 · {elapsed_min}분 경과 — 아직 매진. 계속 F5 중."

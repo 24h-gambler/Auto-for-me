@@ -56,11 +56,14 @@ PAY_BTN = (
     "a:has-text('결제'), button:has-text('결제'), "
     "input[type='submit'][value*='결제']"
 )
-# 결제 페이지에 도달했음을 확인할 수 있는 표식 (제목 / 결제수단 영역 / 신용카드 등).
+# 결제 페이지에 도달했음을 확인할 수 있는 표식 (CSS 셀렉터만).
+# 한국어 텍스트 매칭은 booker.py 의 _payment_visible() 에서 별도 처리.
 PAYMENT_PAGE_MARKER = (
-    "text=결제수단, text=신용카드, text=간편결제, "
-    ".pay_method, #payMethodArea, [class*='payment']"
+    ".pay_method, #payMethodArea, [class*='payment'], [id*='payment'], "
+    ".paymentArea, .pay_area, #pay_area, #payInfo"
 )
+# 페이지 안에 이 한국어 단어들이 보이면 결제 페이지로 간주.
+PAYMENT_PAGE_TEXTS = ("결제수단", "결제정보", "신용카드", "간편결제", "카드결제")
 
 # 좌석 배치도 (좌석 picker)
 # 코레일은 보통 row*column grid: 1~20행 × A,B,(통로),C,D 열 형태.

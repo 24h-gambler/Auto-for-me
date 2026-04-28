@@ -370,8 +370,9 @@ async def _try_book_row(
 # ---------------------------------------------------------------------------
 
 async def _payment_visible(page: Page) -> bool:
-    """결제 페이지 도달 여부 체크 — 메인 프레임 + 모든 iframe 검사."""
-    locators = [
+    """결제 페이지 도달 여부 체크 — 메인 프레임 + 모든 iframe 검사 + 한국어 텍스트 검사."""
+    # 1) CSS 마커 + 결제 버튼이 main frame / iframe 어디든 보이면 OK.
+    css_locators = [
         page.locator(S.PAYMENT_PAGE_MARKER).first,
         page.locator(S.PAY_BTN).first,
     ]
@@ -379,13 +380,21 @@ async def _payment_visible(page: Page) -> bool:
         if fr == page.main_frame:
             continue
         try:
-            locators.append(fr.locator(S.PAYMENT_PAGE_MARKER).first)
-            locators.append(fr.locator(S.PAY_BTN).first)
+            css_locators.append(fr.locator(S.PAYMENT_PAGE_MARKER).first)
+            css_locators.append(fr.locator(S.PAY_BTN).first)
         except Exception:
             pass
-    for loc in locators:
+    for loc in css_locators:
         try:
             if await loc.count():
+                return True
+        except Exception:
+            continue
+
+    # 2) 페이지에 결제 관련 한국어 텍스트가 보이는지 확인 (보조).
+    for txt in S.PAYMENT_PAGE_TEXTS:
+        try:
+            if await page.get_by_text(txt, exact=False).first.count():
                 return True
         except Exception:
             continue

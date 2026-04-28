@@ -25,6 +25,7 @@ class Env(BaseSettings):
 
     headless: bool = Field(True, alias="HEADLESS")
     user_data_dir: str = Field("./state/profile", alias="USER_DATA_DIR")
+    # 공백/주석 잔재가 들어가도 안전하게 동작하도록 strip 처리는 사용처에서.
     proxy_url: str = Field("", alias="PROXY_URL")
 
     orchestrator_model: str = Field("claude-opus-4-7", alias="ORCHESTRATOR_MODEL")

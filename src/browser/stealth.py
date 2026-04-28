@@ -75,8 +75,11 @@ class BrowserPool:
                     "--lang=ko-KR",
                 ],
             }
-            if ENV.proxy_url:
-                launch_kwargs["proxy"] = {"server": ENV.proxy_url}
+            # PROXY_URL 가 비어있거나 공백만이면 proxy 옵션 자체를 넣지 않는다.
+            # 공백 들어있는 채로 넘기면 Playwright 가 'Invalid URL' 로 실패함.
+            proxy_url = (ENV.proxy_url or "").strip()
+            if proxy_url:
+                launch_kwargs["proxy"] = {"server": proxy_url}
 
             # `launch_persistent_context` returns a BrowserContext directly.
             self.ctx = await self.pw.chromium.launch_persistent_context(**launch_kwargs)

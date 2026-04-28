@@ -102,6 +102,19 @@ def load_config() -> AppConfig:
     return AppConfig.model_validate(data)
 
 
+def _load_env() -> Env:
+    """Load .env with a clear, actionable error if required keys are missing."""
+    try:
+        return Env()  # type: ignore[call-arg]
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            "환경변수 로드 실패. .env 파일을 만들고 ANTHROPIC_API_KEY 와 "
+            "TELEGRAM_BOT_TOKEN 을 채워주세요. "
+            "(`cp .env.example .env` 후 편집)\n"
+            f"원본 오류: {exc}"
+        ) from exc
+
+
 # Singletons -----------------------------------------------------------------
-ENV = Env()  # type: ignore[call-arg]
+ENV = _load_env()
 CFG = load_config()

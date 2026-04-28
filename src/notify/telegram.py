@@ -71,12 +71,14 @@ class TelegramService:
         if target is None:
             log.warning("notify.no_chat_id", text=text[:80])
             return
+        # 기본은 plain text — 알림 텍스트에는 ParseMode 불필요. HTML/MarkDown
+        # 파싱을 켜놓으면 메시지 안의 '<' 같은 평범한 글자에서 Telegram 이 거부합니다.
         try:
             if photo_path and Path(photo_path).exists():
                 with open(photo_path, "rb") as f:
                     await self.app.bot.send_photo(target, photo=f, caption=text[:1024])
             else:
-                await self.app.bot.send_message(target, text, parse_mode=ParseMode.HTML)
+                await self.app.bot.send_message(target, text)
         except Exception as exc:  # noqa: BLE001
             log.error("notify.failed", err=str(exc))
 

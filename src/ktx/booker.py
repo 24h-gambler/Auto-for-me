@@ -99,8 +99,19 @@ async def search_trains(
     await human_pause()
     await human_type(page, S.DEPT_INPUT, origin)
     await human_type(page, S.ARRV_INPUT, destination)
+    # 날짜는 readonly/datepicker 인 경우가 많아 value 만 바꾸면 폼 검증이 옛 값을 사용합니다.
+    # input/change 이벤트를 dispatch 해 폼이 새 값을 받도록 강제합니다.
     await page.evaluate(
-        "(args) => { const el = document.querySelector(args[1]); if(el){el.value=args[0];} }",
+        """
+        (args) => {
+          const [val, sel] = args;
+          const el = document.querySelector(sel);
+          if (!el) return;
+          el.value = val;
+          el.dispatchEvent(new Event('input',  { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        """,
         [date.replace("-", ""), S.DATE_INPUT],
     )
     hh = time_str.split(":")[0].zfill(2)
@@ -258,7 +269,62 @@ async def _try_book_row(
         "arrive": row["arrive"],
         "class": "특실" if seat_class == "first" else "일반실",
         "seat": seat,
+        "page": page,   # the page that holds the seat — used for payment navigation
     }
+
+
+# ---------------------------------------------------------------------------
+# Navigate to the actual payment screen
+# ---------------------------------------------------------------------------
+
+async def navigate_to_payment(page: Page, *, max_steps: int = 5) -> bool:
+    """
+    좌석 확보 후, '다음/예매하기/진행' 류 버튼을 차례로 눌러 결제 페이지에 도달합니다.
+    결제 페이지에 도달하면 True. 도달 실패 (또는 예상 외 화면) 면 False.
+
+    `auto_pay=False` 여도 사용자가 결제 화면을 확실히 볼 수 있도록 결제 페이지까지는
+    무조건 진입시키는 게 목적입니다. 실제 '결제하기'(돈을 빼는 최종 버튼) 클릭은
+    이 함수가 하지 않습니다.
+    """
+    for step in range(max_steps):
+        # 이미 결제 페이지에 도달했는지 체크.
+        try:
+            if await page.locator(S.PAYMENT_PAGE_MARKER).first.count():
+                return True
+        except Exception:
+            pass
+        # PAY_BTN(='결제하기') 가 보이면 결제 페이지에 도달한 것이므로 멈춤.
+        try:
+            if await page.locator(S.PAY_BTN).first.count():
+                return True
+        except Exception:
+            pass
+
+        # 다음 단계 버튼 클릭.
+        try:
+            proceed = page.locator(S.PROCEED_BTN).first
+            if not await proceed.count():
+                log.info("payment.no_proceed_btn", step=step)
+                return False
+            await proceed.scroll_into_view_if_needed()
+            await proceed.click(delay=80)
+            await human_pause()
+            try:
+                await page.wait_for_load_state("domcontentloaded", timeout=15000)
+            except Exception:
+                pass
+        except Exception as exc:  # noqa: BLE001
+            log.warning("payment.step_failed", step=step, err=str(exc))
+            return False
+
+    # 마지막 한번 더 확인.
+    try:
+        return bool(
+            await page.locator(S.PAY_BTN).first.count()
+            or await page.locator(S.PAYMENT_PAGE_MARKER).first.count()
+        )
+    except Exception:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -432,17 +498,43 @@ async def run_ktx_job(job, notify: Callable[..., Awaitable[None]]) -> dict[str, 
         return None
 
     # ---- background task for hold-then-keep-polling ---------------------
+    # IMPORTANT: 특실 임시확보 페이지가 떠 있는 `page` 를 침범하면 hold 화면이 사라집니다.
+    # 백그라운드 일반실 폴링은 별도 page 를 만들어 그 위에서만 동작합니다.
     async def keep_polling_standard() -> Optional[dict[str, Any]]:
-        # Polite cadence; we are already holding 특실 so we can be patient.
-        while not job.cancel_event.is_set():
+        bg_page = await POOL.new_page()
+        try:
+            await ensure_logged_in(bg_page, notify=notify)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("hold.bg_login_failed", err=str(exc))
+            await bg_page.close()
+            return None
+        try:
+            while not job.cancel_event.is_set():
+                try:
+                    rows = await search_trains(
+                        bg_page, origin=origin, destination=destination,
+                        date=date, time_str=time_str,
+                    )
+                    cands = [r for r in rows if _within_window(r["depart"], time_str, window)]
+                    cands.sort(key=lambda r: _time_distance(r["depart"], time_str))
+                    for row in cands:
+                        if not row["standard_available"]:
+                            continue
+                        booked = await _try_book_row(
+                            bg_page, row, seat_class="standard",
+                            preferred_columns=preferred_cols,
+                        )
+                        if booked:
+                            return booked
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("hold.bg_poll_failed", err=str(exc))
+                await asyncio.sleep(policy.delay(2))
+            return None
+        finally:
             try:
-                booked = await attempt_standard()
-                if booked:
-                    return booked
-            except Exception as exc:  # noqa: BLE001
-                log.warning("hold.bg_poll_failed", err=str(exc))
-            await asyncio.sleep(policy.delay(2))
-        return None
+                await bg_page.close()
+            except Exception:
+                pass
 
     deadline = CFG.ktx.poll.max_total_hours * 3600
 
@@ -476,9 +568,12 @@ async def run_ktx_job(job, notify: Callable[..., Awaitable[None]]) -> dict[str, 
         # grab 특실 hold and ask user.
         booked = None
         rounds_without_std = 0
+        started = asyncio.get_event_loop().time()
         while booked is None:
             if job.cancel_event.is_set():
                 raise asyncio.CancelledError()
+            if asyncio.get_event_loop().time() - started > deadline:
+                raise TimeoutError(f"KTX 폴링이 {CFG.ktx.poll.max_total_hours}시간을 초과했습니다.")
             attempts["n"] += 1
             booked = await attempt_standard()
             if booked:
@@ -514,18 +609,45 @@ async def run_ktx_job(job, notify: Callable[..., Awaitable[None]]) -> dict[str, 
             await progress(attempts["n"], delay)
             await asyncio.sleep(delay)
 
-    # We have a booking. If 특실 not yet finalized, attempt payment per config.
-    if CFG.ktx.auto_pay and await page.locator(S.PAY_BTN).count():
-        await human_click(page, S.PAY_BTN)
-        await notify(f"💳 [{job.id}] 결제 진행 — {booked['train_no']} {booked['seat']} ({booked['class']})")
-    else:
-        shot = await _capture_screenshot(page, f"hold-{job.id}")
+    # We have a booking. The page that holds the seat may differ from `page`
+    # (e.g. when the background polling task succeeded with `bg_page`).
+    booking_page: Page = booked.pop("page", page)
+
+    # 무조건 결제 페이지까지 진입시킨다 — 사용자 요구.
+    reached = await navigate_to_payment(booking_page)
+    if not reached:
+        shot = await _capture_screenshot(booking_page, f"stuck-{job.id}")
         await notify(
-            f"🎯 [{job.id}] 좌석 확보 완료\n"
+            f"⚠️ [{job.id}] 좌석은 확보됐지만 결제 페이지까지 자동 진입하지 못했습니다.\n"
+            f"   {booked['train_no']} {booked['depart']}→{booked['arrive']} "
+            f"{booked['class']} {booked['seat']}\n"
+            f"코레일 앱/웹에서 직접 결제 마무리해 주세요. 좌석은 약 10분간 유지됩니다.",
+            photo_path=str(shot),
+        )
+        return {"booked": booked, "attempts": attempts["n"], "reached_payment": False}
+
+    shot = await _capture_screenshot(booking_page, f"payment-{job.id}")
+    if CFG.ktx.auto_pay:
+        try:
+            await human_click(booking_page, S.PAY_BTN)
+            await notify(
+                f"💳 [{job.id}] 결제 자동 진행 — {booked['train_no']} {booked['seat']} ({booked['class']})",
+                photo_path=str(shot),
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("auto_pay.failed", err=str(exc))
+            await notify(
+                f"⚠️ [{job.id}] 결제 페이지까지 도달했으나 자동 결제 클릭 실패: {exc}\n"
+                f"화면에서 직접 '결제하기' 를 눌러주세요.",
+                photo_path=str(shot),
+            )
+    else:
+        await notify(
+            f"🎯 [{job.id}] 결제 페이지까지 도달!\n"
             f"   {booked['train_no']} {booked['depart']}→{booked['arrive']}\n"
             f"   {booked['class']} {booked['seat']}\n"
-            f"코레일 앱/웹에서 결제 마무리해주세요.",
+            f"화면에서 결제 수단을 선택하고 '결제하기' 를 눌러주세요. (좌석 ≈10분 유지)",
             photo_path=str(shot),
         )
 
-    return {"booked": booked, "attempts": attempts["n"]}
+    return {"booked": booked, "attempts": attempts["n"], "reached_payment": True}

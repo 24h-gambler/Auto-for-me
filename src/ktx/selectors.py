@@ -32,8 +32,28 @@ ROW_SOLD_OUT_TXT = "td:nth-child(6)"         # '매진' 텍스트가 들어가�
 SOLD_OUT_KEYWORDS = ("매진", "예약대기", "Sold")
 
 # 좌석 선택 / 결제
-PROCEED_BTN = "input[name='proceed'], a#btn_proceed"
-PAY_BTN = "a#btn_pay, input[name='pay']"
+# 좌석 선택 후 → 승객정보/예약확인 → 결제 페이지로 진행하는 "다음/예매하기" 류 버튼들.
+# 코레일은 단계별로 다른 wording 을 쓰므로 후보를 넓게 둡니다.
+PROCEED_BTN = (
+    "input[name='proceed'], a#btn_proceed, "
+    "a:has-text('다음'), button:has-text('다음'), "
+    "a:has-text('예매하기'), button:has-text('예매하기'), "
+    "a:has-text('예약하기'), button:has-text('예약하기'), "
+    "a:has-text('진행'), button:has-text('진행'), "
+    "input[type='submit'][value*='다음'], input[type='submit'][value*='예매']"
+)
+# 실제 결제 페이지로 진입하는 "결제하기" 버튼.
+PAY_BTN = (
+    "a#btn_pay, input[name='pay'], "
+    "a:has-text('결제하기'), button:has-text('결제하기'), "
+    "a:has-text('결제'), button:has-text('결제'), "
+    "input[type='submit'][value*='결제']"
+)
+# 결제 페이지에 도달했음을 확인할 수 있는 표식 (제목 / 결제수단 영역 / 신용카드 등).
+PAYMENT_PAGE_MARKER = (
+    "text=결제수단, text=신용카드, text=간편결제, "
+    ".pay_method, #payMethodArea, [class*='payment']"
+)
 
 # 좌석 배치도 (좌석 picker)
 # 코레일은 보통 row*column grid: 1~20행 × A,B,(통로),C,D 열 형태.

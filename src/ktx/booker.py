@@ -753,37 +753,167 @@ async def _find_user_results_page() -> Optional[Page]:
     return pages[-1] if pages else None
 
 
+async def _scan_and_reserve(
+    page: Page, *, allow_standing: bool = True
+) -> Optional[dict[str, Any]]:
+    """결과 페이지의 보이는 행들에서 매진 아닌 셀 찾아 클릭 + 예매 버튼까지 누름.
+
+    우선순위: 좌석(가격) > 입석+좌석.
+    각 후보를 클릭한 뒤 .reservbtn 이 보이면 그것까지 클릭하고 종료.
+    결제 페이지 진입은 호출측에서 navigate_to_payment 로 이어감.
+    """
+    candidates: list[tuple[str, Any]] = []
+
+    # 1) 가격 표시된 좌석 링크 (일반실/특실)
+    try:
+        for el in await page.locator(S.SEAT_AVAIL_LINK).all():
+            try:
+                txt = (await el.inner_text()).strip()
+            except Exception:
+                continue
+            if "매진" in txt and "임박" not in txt:
+                continue
+            if "원" not in txt:
+                continue
+            candidates.append(("seat", el))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("scan.seat_failed", err=str(exc))
+
+    # 2) 입석+좌석 (좌석이 다 매진일 때 fallback)
+    if allow_standing:
+        try:
+            for el in await page.locator(S.STANDING_AVAIL_LINK).all():
+                try:
+                    txt = (await el.inner_text()).strip()
+                except Exception:
+                    continue
+                if "입석" not in txt:
+                    continue
+                if "매진" in txt and "임박" not in txt:
+                    continue
+                candidates.append(("standing", el))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("scan.standing_failed", err=str(exc))
+
+    if not candidates:
+        return None
+
+    # 후보 클릭 → 예매 버튼까지 누름. 첫 성공 시 즉시 종료.
+    for kind, el in candidates:
+        try:
+            txt = (await el.inner_text()).strip()
+            await el.scroll_into_view_if_needed()
+            await human_idle_micro()
+            await el.click(delay=80)
+            await human_pause()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("scan.cell_click_failed", err=str(exc))
+            continue
+
+        # 셀 클릭 후 '예매' 버튼이 보일 때까지 잠시 대기 (UI 반응 시간).
+        reserved = False
+        for _ in range(6):
+            try:
+                btn = page.locator(S.RESERVE_BTN).first
+                if await btn.count():
+                    await btn.scroll_into_view_if_needed()
+                    await human_idle_micro()
+                    await btn.click(delay=80)
+                    await human_pause()
+                    reserved = True
+                    break
+            except Exception:
+                pass
+            await asyncio.sleep(0.3)
+
+        return {"kind": kind, "cell_text": txt[:80], "reserved_btn_clicked": reserved}
+
+    return None
+
+
+async def _click_load_more(page: Page) -> bool:
+    """'더보기' 클릭해서 다음 시간대 로드. 성공 시 True."""
+    try:
+        more = page.locator(S.LOAD_MORE_BTN).first
+        if not await more.count():
+            return False
+        await more.scroll_into_view_if_needed()
+        await human_idle_micro()
+        await more.click(delay=80)
+        await human_pause()
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning("scan.load_more_failed", err=str(exc))
+        return False
+
+
 async def refresh_and_click_loop(
     job, notify: Callable[..., Awaitable[None]],
 ) -> dict[str, Any]:
-    """사용자가 검색까지 마친 페이지에서, 새로고침을 반복하며
-    매진 아닌 행이 보이면 즉시 클릭해 결제 페이지까지 진입.
+    """사용자가 직접 검색까지 한 페이지를 받아 다음을 무한 반복:
+       1. 차단 감지/회복
+       2. 보이는 셀 스캔 → 매진 아닌 거 발견 시 클릭 + 예매 버튼 클릭
+       3. 없으면 '더보기' 로 다음 시간대 로드 후 다시 스캔 (최대 5회)
+       4. 그래도 없으면 랜덤 15~30초 대기 후 새로고침
 
-    이 모드의 장점:
-      - 자동화로 로그인/검색을 안 해서 매크로 탐지에 거의 안 걸림
-      - 사용자가 검색 조건을 직접 골라 정확함
-      - 봇은 단순한 "새로고침 + 클릭" 만 함
+    옵션:
+      - aggressive=true 면 새로고침 주기 8~18초 (탐지 위험 ↑)
+      - 입석+좌석 도 잡을지는 job.params['allow_standing'] (기본 True)
     """
     page = await _find_user_results_page()
     if page is None:
         await notify(
             f"❌ [{job.id}] 봇 브라우저에 코레일 페이지가 없습니다.\n"
-            f"봇 chromium 창에서 직접 로그인 → 검색 결과 페이지까지 이동한 뒤 다시 /refresh."
+            f"봇 chromium 창에서 직접 로그인 → 검색 결과 페이지까지 이동한 뒤 /refresh."
         )
         raise RuntimeError("no korail page in browser context")
 
+    aggressive = bool(job.params.get("aggressive", False))
+    allow_standing = bool(job.params.get("allow_standing", True))
+    base_lo, base_hi = (8, 18) if aggressive else (15, 30)
+
     await notify(
         f"🔁 [{job.id}] 새로고침 모드 시작\n"
-        f"   대상 페이지: {page.url}\n"
-        f"   주기: 15~30초 (랜덤). 매진 아닌 행 발견 시 즉시 클릭."
+        f"   페이지: {page.url}\n"
+        f"   주기: {base_lo}~{base_hi}초 (랜덤)\n"
+        f"   입석+좌석: {'잡음' if allow_standing else '안 잡음'}\n"
+        f"   매진 아닌 좌석 발견 시 즉시 클릭 → 예매 버튼 클릭 → 결제 페이지로."
     )
 
-    aggressive = bool(job.params.get("aggressive", False))
-    base_lo, base_hi = (8, 18) if aggressive else (15, 30)
     deadline = CFG.ktx.poll.max_total_hours * 3600
     started = asyncio.get_event_loop().time()
     attempt = 0
     last_ping = started
+
+    async def _try_finalize(result: dict[str, Any]) -> dict[str, Any]:
+        """예매 버튼 누른 뒤 결제 페이지까지 끌고 가기."""
+        await human_pause()
+        shot = await _capture_screenshot(page, f"clicked-{job.id}")
+        await notify(
+            f"🎯 [{job.id}] 좌석 클릭 + 예매 시도!\n"
+            f"   종류: {'좌석' if result['kind'] == 'seat' else '입석+좌석'}\n"
+            f"   셀: {result['cell_text']}\n"
+            f"   결제 페이지까지 자동 진입 시도합니다.",
+            photo_path=str(shot),
+        )
+        reached = await navigate_to_payment(page, notify=notify, job_id=job.id)
+        if reached:
+            shot2 = await _capture_screenshot(page, f"payment-{job.id}")
+            await notify(
+                f"✅ [{job.id}] 결제 페이지 도달!\n"
+                f"PC chromium 화면에서 결제수단 선택 → '결제하기' 클릭. (좌석 ≈10분 유지)",
+                photo_path=str(shot2),
+            )
+            return {"reached_payment": True, "attempts": attempt, "kind": result["kind"]}
+        shot3 = await _capture_screenshot(page, f"stuck-{job.id}")
+        dump = await _dump_html(page, f"stuck-{job.id}")
+        await notify(
+            f"⚠️ [{job.id}] 좌석 클릭은 됐는데 결제 페이지까지 자동 진입 실패.\n"
+            f"PC 화면에서 직접 진행해주세요. 좌석 ≈10분 유지.\n"
+            f"덤프: {dump.name}",
+            photo_path=str(shot3),
+        )
+        return {"reached_payment": False, "attempts": attempt, "kind": result["kind"]}
 
     while not job.cancel_event.is_set():
         attempt += 1
@@ -797,66 +927,30 @@ async def refresh_and_click_loop(
             await recover_from_block(page, marker=marker, notify=notify, job_id=job.id)
             continue
 
-        # 2) 매진 아닌 가격 셀 찾기 → 클릭
-        clicked_cell = None
-        try:
-            cells = await page.locator(S.ROW_PRICE_CELL).all()
-            for cell in cells:
-                try:
-                    txt = (await cell.inner_text()).strip()
-                except Exception:
-                    continue
-                if "매진" in txt and "임박" not in txt:
-                    continue
-                if "원" not in txt:
-                    continue
-                # 가격 셀 발견 — 클릭 시도.
-                try:
-                    await cell.scroll_into_view_if_needed()
-                    await human_idle_micro()
-                    await cell.click(delay=80)
-                    clicked_cell = txt
-                    break
-                except Exception as exc:  # noqa: BLE001
-                    log.warning("refresh.click_failed", err=str(exc))
-                    continue
-        except Exception as exc:  # noqa: BLE001
-            log.warning("refresh.scan_failed", err=str(exc))
+        # 2) 현재 보이는 화면에서 스캔 + 클릭
+        result = await _scan_and_reserve(page, allow_standing=allow_standing)
+        if result:
+            return await _try_finalize(result)
 
-        if clicked_cell:
-            await human_pause()
-            shot = await _capture_screenshot(page, f"clicked-{job.id}")
-            await notify(
-                f"🎯 [{job.id}] 매진 아닌 좌석 클릭됨!\n"
-                f"   셀 내용: {clicked_cell[:60]}\n"
-                f"   결제 페이지까지 자동 진입 시도합니다.",
-                photo_path=str(shot),
-            )
-            # 결제 페이지까지 진입 시도 (PROCEED → 좌석 → PAY 순)
-            reached = await navigate_to_payment(page, notify=notify, job_id=job.id)
-            if reached:
-                shot2 = await _capture_screenshot(page, f"payment-{job.id}")
-                await notify(
-                    f"✅ [{job.id}] 결제 페이지 도달!\n"
-                    f"화면에서 결제수단 선택 → '결제하기' 클릭. (좌석 ≈10분 유지)",
-                    photo_path=str(shot2),
-                )
-                return {"reached_payment": True, "attempts": attempt, "url": page.url}
-            else:
-                shot3 = await _capture_screenshot(page, f"after-click-{job.id}")
-                await notify(
-                    f"⚠️ [{job.id}] 클릭은 됐지만 결제 페이지까지 자동 진입 못함.\n"
-                    f"화면에서 직접 다음 단계 진행해주세요. 좌석 ≈10분 유지.",
-                    photo_path=str(shot3),
-                )
-                return {"reached_payment": False, "attempts": attempt, "url": page.url}
+        # 3) 안 보이면 '더보기' 로 펼치며 최대 5회 추가 스캔
+        loaded = 0
+        for _ in range(5):
+            if not await _click_load_more(page):
+                break
+            loaded += 1
+            result = await _scan_and_reserve(page, allow_standing=allow_standing)
+            if result:
+                return await _try_finalize(result)
 
-        # 3) 진행 알림 (10회마다)
+        # 4) 진행 알림 (10회마다 또는 2분마다)
         if attempt % 10 == 0 or now - last_ping > 120:
-            await notify(f"⏳ [{job.id}] {attempt}회차 새로고침 — 아직 매진. 계속 시도 중.")
+            await notify(
+                f"⏳ [{job.id}] {attempt}회차 — 아직 다 매진 "
+                f"(이번 회차 더보기 {loaded}회 시도). 계속 시도 중."
+            )
             last_ping = now
 
-        # 4) 랜덤 대기 후 새로고침
+        # 5) 랜덤 대기 후 새로고침
         delay = random.uniform(base_lo, base_hi)
         try:
             await asyncio.wait_for(job.cancel_event.wait(), timeout=delay)

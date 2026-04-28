@@ -99,12 +99,16 @@ class TelegramService:
 
     async def cmd_help(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(
-            "🚄 KTX 예매\n"
-            "  /refresh                                 ← 사용자가 검색까지 직접 한 페이지를 봇이 새로고침+클릭 (매크로 회피, 추천)\n"
-            "  /refresh !                               ← 위 모드의 빠른 버전 (8~18초)\n"
-            "  /book 서울 부산 2026-05-10 09:00 120     ← 봇이 처음부터 자동 (탐지 위험)\n"
+            "🚄 KTX 예매 (사용자가 직접 로그인+검색 → /refresh 가 가장 안전·빠름)\n"
+            "  /refresh             ← 좌석+입석 둘 다 잡음 (15~30초마다 새로고침)\n"
+            "  /refresh !           ← 빠른 새로고침 (8~18초)\n"
+            "  /refresh 좌석        ← 좌석만, 입석+좌석 무시\n"
+            "  /refresh ! 좌석      ← 빠른 + 좌석만\n"
+            "\n"
+            "🚄 자동 모드 (봇이 처음부터 다 함, 탐지 위험)\n"
+            "  /book 서울 부산 2026-05-10 09:00 120     ← 빠른 자동 폴링\n"
             "  /ktx  서울 부산 2026-05-10 09:00 120 !   ← /book 과 동일\n"
-            "  /ktx  서울 부산 2026-05-10 09:00 120     ← 보통 폴링\n"
+            "  /ktx  서울 부산 2026-05-10 09:00 120     ← 보통 자동 폴링\n"
             "  마지막 숫자는 ±분(시간 폭)\n"
             "\n"
             "👀 클라우드 감시 (PC 꺼져있을 때)\n"
@@ -186,24 +190,41 @@ class TelegramService:
     async def cmd_refresh(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         """/refresh — 매크로 회피 모드.
         사용자가 봇 chromium 창에서 직접 로그인 + 검색까지 한 페이지를
-        그대로 받아, 봇은 새로고침 + 매진 아닌 행 클릭만 자동화.
+        그대로 받아, 봇은 새로고침 + 매진 아닌 셀 클릭 + 예매 버튼 클릭 자동화.
 
-        끝에 ! 붙이면 더 빠른 새로고침 (8~18초). 기본은 15~30초.
+        플래그 (한 줄 끝에 공백으로 구분, 순서 무관):
+          !       빠른 새로고침 (8~18초). 기본은 15~30초.
+          좌석    좌석만 잡음. (입석+좌석 무시)
+          입석    입석+좌석 도 잡음 (기본).
+
+        예시:
+          /refresh                  ← 좌석 + 입석+좌석 (기본)
+          /refresh !                ← 빠른 모드
+          /refresh 좌석             ← 좌석만, 입석+좌석 무시
+          /refresh ! 좌석           ← 빠른 + 좌석만
         """
         if not _is_authorized(update.effective_chat.id):
             return
-        a = ctx.args
-        aggressive = a and a[-1] == "!"
+        a = ctx.args or []
+        aggressive = "!" in a
+        # '좌석' 만 명시되면 입석+좌석 잡지 않음. 기본은 둘 다 잡음.
+        if "좌석" in a and "입석" not in a:
+            allow_standing = False
+        else:
+            allow_standing = True
         params = {
             "seat_class_strategy": "refresh",
             "aggressive": bool(aggressive),
+            "allow_standing": allow_standing,
         }
         self._default_chat_id = update.effective_chat.id
         job = self.manager.submit("ktx", params, chat_id=update.effective_chat.id)
         await update.message.reply_text(
-            f"🔁 [{job.id}] 새로고침 모드 시작.\n"
+            f"🔁 [{job.id}] 새로고침 모드 시작 "
+            f"({'🔥빠름' if aggressive else '🐢보통'}, "
+            f"{'좌석만' if not allow_standing else '좌석+입석'})\n"
             f"봇 chromium 창에서 검색 결과 페이지가 떠 있어야 합니다.\n"
-            f"매진 아닌 좌석 발견 시 즉시 클릭 → 결제 페이지로."
+            f"매진 아닌 좌석 발견 시 즉시 클릭 → 예매 → 결제 페이지로."
         )
 
     async def cmd_book(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:

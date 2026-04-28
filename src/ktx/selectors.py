@@ -85,9 +85,31 @@ RESULT_ROWS = (
     "div.train_item, div[class*='train_row'], "
     "table#tbl_search tbody tr, table.tbl_l tbody tr"
 )
-# 가격이 있는 셀 = 예약 가능 (예 "20,100원"). "매진"과 "-"는 제외.
+# 가격이 있는 셀 (예전 호환 alias).
 ROW_PRICE_CELL = "td:has-text('원'):not(:text-is('매진'))"
 ROW_SOLD_OUT_CELL = "td:text-is('매진'), td:text-is('-')"
+
+# ── 새 사이트 결과 페이지 셀 패턴 ──────────────────────────────────
+# 일반실/특실 좌석 예약 링크 — 가격(.txt_gr 또는 .txt_price) 표시:
+#   <a><p class="txt_ch">일반실</p><p class="txt_price">15% 할인</p>
+#      <p class="txt_gr">20,100원</p></a>
+SEAT_AVAIL_LINK = "a:has(p.txt_gr), a:has(p.txt_price)"
+
+# 입석+좌석 링크:
+#   <a><div class="tck_etc_use">입석 + 좌석</div></a>
+STANDING_AVAIL_LINK = "a:has(.tck_etc_use)"
+
+# 셀 클릭 후 나타나는 '예매' 확정 버튼:
+#   <button class="btn_bn-blue02 reservbtn">예매</button>
+RESERVE_BTN = (
+    "button.reservbtn, "
+    "button.btn_bn-blue02:has-text('예매'), "
+    "button:has-text('예매')"
+)
+
+# '더보기' (다음 시간대):
+#   <a class="page_group"><span>더보기</span></a>
+LOAD_MORE_BTN = "a.page_group, a:has(span:text-is('더보기'))"
 ROW_TRAIN_NO = "td:nth-child(2)"
 ROW_DEPT_TIME = "td:nth-child(3)"
 ROW_ARRV_TIME = "td:nth-child(4)"

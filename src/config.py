@@ -46,16 +46,17 @@ class KTXPassenger(BaseModel):
 
 
 class KTXPoll(BaseModel):
-    base_interval_sec: int = 8
-    jitter_sec: int = 5
-    max_interval_sec: int = 90
+    # 새 코레일 사이트가 봇 탐지가 강해서 보수적으로 조정 (-8003 회피).
+    base_interval_sec: int = 15
+    jitter_sec: int = 8
+    max_interval_sec: int = 120
     max_total_hours: int = 48
     # aggressive=true 면 거의 일정 간격으로 빠르게 폴링 (봇 탐지 위험 ↑).
     # 예매 오픈일 / 매진 임박 구간에 일시적으로 켜는 용도.
     aggressive: bool = False
-    aggressive_base_sec: int = 4
-    aggressive_cap_sec: int = 12
-    aggressive_jitter_sec: int = 2
+    aggressive_base_sec: int = 8
+    aggressive_cap_sec: int = 20
+    aggressive_jitter_sec: int = 4
 
 
 class KTXConfig(BaseModel):

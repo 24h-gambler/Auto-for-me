@@ -20,6 +20,7 @@ Captcha is never auto-solved — relayed via Telegram.
 from __future__ import annotations
 
 import asyncio
+import random
 import re
 from datetime import datetime
 from pathlib import Path
@@ -27,7 +28,13 @@ from typing import Any, Awaitable, Callable, Optional
 
 from playwright.async_api import Page
 
-from ..browser.humanize import human_click, human_pause, human_type
+from ..browser.humanize import (
+    human_arrival_pause,
+    human_click,
+    human_idle_micro,
+    human_pause,
+    human_type,
+)
 from ..browser.stealth import POOL
 from ..config import CFG, ENV
 from ..utils.log import get_logger
@@ -51,6 +58,67 @@ async def _capture_screenshot(page: Page, label: str) -> Path:
     p = out / f"{label}-{int(datetime.utcnow().timestamp())}.png"
     await page.screenshot(path=str(p), full_page=False)
     return p
+
+
+async def _dump_html(page: Page, label: str) -> Path:
+    """디버깅용 — 페이지 전체 HTML 저장. 셀렉터 갱신할 때 본인이 이 파일 보내주면 됨."""
+    out = Path("state/dumps")
+    out.mkdir(parents=True, exist_ok=True)
+    p = out / f"{label}-{int(datetime.utcnow().timestamp())}.html"
+    try:
+        html = await page.content()
+        p.write_text(html, encoding="utf-8")
+    except Exception:
+        pass
+    return p
+
+
+# ── 매크로 탐지 / 차단 페이지 회복 ─────────────────────────────────
+# 새 코레일 사이트가 자동화를 잡으면 'CODE : -8003' / '매크로' 등의 메시지를
+# 띄운다. 이걸 감지해 새로고침 + 긴 대기 + 알림 으로 회복한다.
+BLOCK_MARKERS = (
+    "CODE : -8003",
+    "매크로",
+    "미허가 도구",
+    "비정상적인 접근",
+    "이용이 제한",
+)
+
+
+async def detect_block(page: Page) -> Optional[str]:
+    try:
+        body = await page.locator("body").first.inner_text(timeout=2000)
+    except Exception:
+        return None
+    for marker in BLOCK_MARKERS:
+        if marker in body:
+            return marker
+    return None
+
+
+async def recover_from_block(
+    page: Page, *, marker: str, notify=None, job_id: str = ""
+) -> None:
+    """차단 화면 발견 → 스크린샷 + HTML 덤프 → 1~3분 대기 → 새로고침."""
+    shot = await _capture_screenshot(page, f"block-{job_id or 'x'}")
+    dump = await _dump_html(page, f"block-{job_id or 'x'}")
+    log.warning("block.detected", marker=marker, shot=str(shot), dump=str(dump))
+    if notify:
+        await notify(
+            f"🛑 차단 페이지 감지 ({marker}). 1~3분 쉬었다가 다시 시도합니다.\n"
+            f"덤프: {dump.name}",
+            photo_path=str(shot),
+        )
+    # 의도적으로 긴 임의 대기 — 봇 패턴 깨기.
+    await asyncio.sleep(random.uniform(60, 180))
+    try:
+        await page.reload(wait_until="domcontentloaded")
+    except Exception:
+        try:
+            await page.goto(S.HOME_URL, wait_until="domcontentloaded")
+        except Exception:
+            pass
+    await human_arrival_pause()
 
 
 # ---------------------------------------------------------------------------
@@ -235,24 +303,52 @@ async def _select_hour(page: Page, time_str: str) -> None:
 
 
 async def search_trains(
-    page: Page, *, origin: str, destination: str, date: str, time_str: str
+    page: Page, *, origin: str, destination: str, date: str, time_str: str,
+    notify=None, job_id: str = "",
 ) -> list[dict[str, Any]]:
-    """새 korail.com 검색 흐름 — 출발역→도착역→날짜→시간→조회."""
-    await page.goto(S.SEARCH_URL, wait_until="domcontentloaded")
-    await human_pause()
-    await dismiss_popups(page)
+    """새 korail.com 검색 흐름 — 출발역→도착역→날짜→시간→조회.
+    각 단계마다 차단 페이지(-8003 등) 검사하고, 걸리면 회복 후 처음부터 재시도."""
+    for attempt in range(3):
+        await page.goto(S.SEARCH_URL, wait_until="domcontentloaded")
+        await human_arrival_pause()
+        await dismiss_popups(page)
 
-    await _select_station(page, open_btn_sel=S.DEPT_OPEN_BTN, name=origin)
-    await _select_station(page, open_btn_sel=S.ARRV_OPEN_BTN, name=destination)
-    await _select_date(page, date)
-    await _select_hour(page, time_str)
+        marker = await detect_block(page)
+        if marker:
+            await recover_from_block(page, marker=marker, notify=notify, job_id=job_id)
+            continue
 
-    await page.click(S.SEARCH_BTN)
-    try:
-        await page.wait_for_selector(S.RESULT_ROWS, timeout=20000)
-    except Exception:
-        log.warning("search.no_results_selector")
-    await dismiss_popups(page)
+        try:
+            await _select_station(page, open_btn_sel=S.DEPT_OPEN_BTN, name=origin)
+            await _select_station(page, open_btn_sel=S.ARRV_OPEN_BTN, name=destination)
+            await _select_date(page, date)
+            await _select_hour(page, time_str)
+
+            await human_idle_micro()
+            await page.click(S.SEARCH_BTN)
+            try:
+                await page.wait_for_selector(S.RESULT_ROWS, timeout=20000)
+            except Exception:
+                log.warning("search.no_results_selector")
+
+            marker = await detect_block(page)
+            if marker:
+                await recover_from_block(page, marker=marker, notify=notify, job_id=job_id)
+                continue
+
+            await dismiss_popups(page)
+            break
+        except Exception as exc:  # noqa: BLE001
+            dump = await _dump_html(page, f"search-fail-{job_id or 'x'}")
+            log.warning("search.failed", attempt=attempt, err=str(exc), dump=str(dump))
+            if attempt == 2:
+                if notify:
+                    await notify(
+                        f"⚠️ 검색 단계가 3회 실패. 페이지 HTML 덤프 저장됨:\n{dump}\n"
+                        f"코드 갱신을 위해 이 파일 내용을 알려주세요."
+                    )
+                raise
+            await asyncio.sleep(random.uniform(20, 60))
 
     rows = await page.locator(S.RESULT_ROWS).all()
     out: list[dict[str, Any]] = []
@@ -682,7 +778,8 @@ async def run_ktx_job(job, notify: Callable[..., Awaitable[None]]) -> dict[str, 
     # ---- one search-and-attempt round, returns booking or None ----------
     async def attempt_standard() -> Optional[dict[str, Any]]:
         rows = await search_trains(
-            page, origin=origin, destination=destination, date=date, time_str=time_str
+            page, origin=origin, destination=destination, date=date, time_str=time_str,
+            notify=notify, job_id=job.id,
         )
         cands = [r for r in rows if _within_window(r["depart"], time_str, window)]
         cands.sort(key=lambda r: _time_distance(r["depart"], time_str))
@@ -700,7 +797,8 @@ async def run_ktx_job(job, notify: Callable[..., Awaitable[None]]) -> dict[str, 
         """가장 빠른 좌석 1개 — 일반실 우선, 안 되면 같은 열차의 특실 즉시 시도.
         대기 / hold 로직 없이 잡히는 즉시 결제 페이지로 진입한다."""
         rows = await search_trains(
-            page, origin=origin, destination=destination, date=date, time_str=time_str
+            page, origin=origin, destination=destination, date=date, time_str=time_str,
+            notify=notify, job_id=job.id,
         )
         cands = [r for r in rows if _within_window(r["depart"], time_str, window)]
         cands.sort(key=lambda r: _time_distance(r["depart"], time_str))
@@ -718,7 +816,8 @@ async def run_ktx_job(job, notify: Callable[..., Awaitable[None]]) -> dict[str, 
 
     async def attempt_first_class() -> Optional[dict[str, Any]]:
         rows = await search_trains(
-            page, origin=origin, destination=destination, date=date, time_str=time_str
+            page, origin=origin, destination=destination, date=date, time_str=time_str,
+            notify=notify, job_id=job.id,
         )
         cands = [r for r in rows if _within_window(r["depart"], time_str, window)]
         cands.sort(key=lambda r: _time_distance(r["depart"], time_str))
@@ -749,6 +848,7 @@ async def run_ktx_job(job, notify: Callable[..., Awaitable[None]]) -> dict[str, 
                     rows = await search_trains(
                         bg_page, origin=origin, destination=destination,
                         date=date, time_str=time_str,
+                        notify=notify, job_id=job.id,
                     )
                     cands = [r for r in rows if _within_window(r["depart"], time_str, window)]
                     cands.sort(key=lambda r: _time_distance(r["depart"], time_str))

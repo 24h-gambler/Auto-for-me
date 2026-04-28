@@ -33,6 +33,17 @@ async def human_pause() -> None:
     await asyncio.sleep(_rand_delay())
 
 
+async def human_arrival_pause() -> None:
+    """페이지 이동 직후 사람이 화면 보고 적응하는 시간 — 2~5초.
+    이걸 안 넣으면 봇 행동이 너무 즉각적이어서 탐지에 잘 걸린다."""
+    await asyncio.sleep(random.uniform(1.8, 4.5))
+
+
+async def human_idle_micro() -> None:
+    """클릭/타이핑 직전의 짧은 망설임 — 100~600ms."""
+    await asyncio.sleep(random.uniform(0.1, 0.6))
+
+
 def _bezier(
     p0: Tuple[float, float],
     p1: Tuple[float, float],
@@ -88,7 +99,8 @@ async def human_click(page: Page, selector: str, *, timeout: int = 15000) -> Non
     tx = box["x"] + box["width"] * random.uniform(0.25, 0.75)
     ty = box["y"] + box["height"] * random.uniform(0.30, 0.70)
     await human_mouse_to(page, tx, ty)
-    await asyncio.sleep(random.uniform(0.05, 0.18))
+    # 클릭 직전 짧은 망설임 — 사람은 hover 후 잠깐 멈추고 누른다.
+    await human_idle_micro()
     await page.mouse.down()
     await asyncio.sleep(random.uniform(0.04, 0.12))
     await page.mouse.up()

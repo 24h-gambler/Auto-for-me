@@ -1,24 +1,21 @@
 @echo off
-REM ====================================================================
-REM  Auto-for-me — Start the Telegram bot
-REM
-REM  Double-click this file to start the bot in a new PowerShell window.
-REM  Make sure Chrome is already running (start_chrome.bat first).
-REM ====================================================================
+REM Auto-for-me — Start the bot only
+setlocal
 
-cd /d "%~dp0\.."
+set "PROJECT=%~dp0.."
+if exist "%PROJECT%\.venv\Scripts\Activate.ps1" goto :found
+set "PROJECT=%USERPROFILE%\Auto-for-me"
+if exist "%PROJECT%\.venv\Scripts\Activate.ps1" goto :found
+set "PROJECT=C:\Users\%USERNAME%\Auto-for-me"
+if exist "%PROJECT%\.venv\Scripts\Activate.ps1" goto :found
 
-REM Verify the venv exists
-if not exist ".venv\Scripts\Activate.ps1" (
-  echo .venv not found. Run setup first:
-  echo   python -m venv .venv
-  echo   .venv\Scripts\Activate.ps1
-  echo   pip install -r requirements.txt
-  echo   playwright install chromium
-  pause
-  exit /b 1
-)
+echo ERROR: Could not locate Auto-for-me project (.venv not found).
+echo Tip: create a Shortcut to this .bat instead of copying it.
+pause
+exit /b 1
 
-REM Activate venv and run the bot
+:found
+cd /d "%PROJECT%"
 PowerShell -NoExit -ExecutionPolicy Bypass -Command ^
-  "Set-Location '%CD%'; .venv\Scripts\Activate.ps1; python -m src.main"
+  "Set-Location '%PROJECT%'; .venv\Scripts\Activate.ps1; python -m src.main"
+endlocal

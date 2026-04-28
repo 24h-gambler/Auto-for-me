@@ -59,6 +59,7 @@ class TelegramService:
         self.app.add_handler(CommandHandler("cancel", self.cmd_cancel))
         self.app.add_handler(CommandHandler("captcha", self.cmd_captcha))
         self.app.add_handler(CommandHandler("ktx", self.cmd_ktx))
+        self.app.add_handler(CommandHandler("book", self.cmd_book))
         self.app.add_handler(CommandHandler("coupang", self.cmd_coupang))
         self.app.add_handler(CommandHandler("watch", self.cmd_watch))
         self.app.add_handler(CommandHandler("unwatch", self.cmd_unwatch))
@@ -97,12 +98,25 @@ class TelegramService:
 
     async def cmd_help(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(
-            "/ktx 서울 부산 2026-05-10 09:00 120  (마지막 숫자는 ±분)\n"
-            "/coupang 무선마우스 50000 사무용\n"
-            "/jobs        진행/완료 작업 목록\n"
-            "/cancel <id> 작업 취소\n"
-            "/captcha <code>  봇이 요청하면 캡차 입력\n"
-            "또는 그냥 자유롭게 한국어로 말씀하세요. Claude 가 알아서 해석합니다."
+            "🚄 KTX 예매\n"
+            "  /book 서울 부산 2026-05-10 09:00 120     ← 빠른 폴링·아무 좌석 (추천)\n"
+            "  /ktx  서울 부산 2026-05-10 09:00 120 !   ← /book 과 동일\n"
+            "  /ktx  서울 부산 2026-05-10 09:00 120     ← 보통 폴링\n"
+            "  마지막 숫자는 ±분(시간 폭)\n"
+            "\n"
+            "👀 클라우드 감시 (PC 꺼져있을 때)\n"
+            "  /watch 서울 부산 2026-05-10 09:00 120\n"
+            "  /watches  /unwatch <id>\n"
+            "\n"
+            "🛠️ 운영\n"
+            "  /jobs        진행/완료 작업 목록\n"
+            "  /cancel <id> 작업 취소\n"
+            "  /captcha <code>  봇이 요청하면 캡차 입력\n"
+            "\n"
+            "🛒 쿠팡 (Anthropic API 키 필요)\n"
+            "  /coupang 무선마우스 50000 사무용\n"
+            "\n"
+            "💬 자유채팅도 됩니다 (API 키 있을 때만)."
         )
 
     async def cmd_jobs(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -139,10 +153,41 @@ class TelegramService:
     async def cmd_ktx(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not _is_authorized(update.effective_chat.id):
             return
-        # /ktx <origin> <dest> <YYYY-MM-DD> <HH:MM> [window_min]
+        # /ktx <origin> <dest> <YYYY-MM-DD> <HH:MM> [window_min] [! 빠른 폴링]
         a = ctx.args
         if len(a) < 4:
-            await update.message.reply_text("사용법: /ktx 서울 부산 2026-05-10 09:00 120")
+            await update.message.reply_text(
+                "사용법: /ktx 서울 부산 2026-05-10 09:00 120\n"
+                "         (마지막에 ! 붙이면 빠른 폴링: /ktx 서울 부산 2026-05-10 09:00 120 !)\n"
+                "또는: /book 서울 부산 2026-05-10 09:00 120  (= 빠른 폴링 단축키)"
+            )
+            return
+        aggressive = a[-1] == "!"
+        if aggressive:
+            a = a[:-1]
+        params = {
+            "origin": a[0],
+            "destination": a[1],
+            "date": a[2],
+            "time": a[3],
+            "window_minutes": int(a[4]) if len(a) > 4 else 120,
+            "seat_class_strategy": "any",
+            "aggressive": aggressive,
+        }
+        self._default_chat_id = update.effective_chat.id
+        job = self.manager.submit("ktx", params, chat_id=update.effective_chat.id)
+        await update.message.reply_text(
+            f"등록됨 [{job.id}] · {'🔥 빠른 폴링' if aggressive else '🐢 일반 폴링'}"
+        )
+
+    async def cmd_book(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """/book 서울 부산 2026-05-10 09:00 120
+        = /ktx 와 동일하지만 항상 빠른 폴링 + 일반/특실 가리지 않고 잡힘 즉시 결제."""
+        if not _is_authorized(update.effective_chat.id):
+            return
+        a = ctx.args
+        if len(a) < 4:
+            await update.message.reply_text("사용법: /book 서울 부산 2026-05-10 09:00 120")
             return
         params = {
             "origin": a[0],
@@ -150,10 +195,12 @@ class TelegramService:
             "date": a[2],
             "time": a[3],
             "window_minutes": int(a[4]) if len(a) > 4 else 120,
+            "seat_class_strategy": "any",
+            "aggressive": True,
         }
         self._default_chat_id = update.effective_chat.id
-        job = self.manager.submit("ktx", params)
-        await update.message.reply_text(f"등록됨 [{job.id}]")
+        job = self.manager.submit("ktx", params, chat_id=update.effective_chat.id)
+        await update.message.reply_text(f"🔥 [{job.id}] 빠른 폴링 시작 — 잡히면 즉시 알림.")
 
     async def cmd_coupang(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not _is_authorized(update.effective_chat.id):

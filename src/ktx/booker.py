@@ -567,17 +567,22 @@ async def run_ktx_job(job, notify: Callable[..., Awaitable[None]]) -> dict[str, 
     date: str = p["date"]
     time_str: str = p["time"]
     window: int = int(p.get("window_minutes") or 120)
-    strategy: str = p.get("seat_class_strategy") or "standard_first_then_first_class_hold"
+    strategy: str = p.get("seat_class_strategy") or "any"
     preferred_cols: list[str] = p.get("preferred_columns") or ["A", "D"]
     hold_minutes: int = int(p.get("first_class_hold_minutes") or 8)
+    # 빠른 폴링 모드 — 작업 단위로 toggle 가능. 미지정 시 config 따름.
+    aggressive: bool = bool(p.get("aggressive", CFG.ktx.poll.aggressive))
 
     await POOL.start()
     page = await POOL.new_page()
+    cadence = "🔥 빠른 폴링 (≈4초 간격)" if aggressive else "🐢 일반 폴링 (≈8~90초 백오프)"
     await notify(
         f"🚄 [{job.id}] {origin}→{destination} {date} {time_str} ±{window}분 시작\n"
         f"좌석 전략: {strategy}\n"
         f"창가 우선: {','.join(preferred_cols)}\n"
-        f"매진 시 최대 {CFG.ktx.poll.max_total_hours}시간 동안 무한 폴링."
+        f"폴링: {cadence}\n"
+        f"매진 시 최대 {CFG.ktx.poll.max_total_hours}시간 동안 무한 폴링.\n"
+        f"잡히면 결제 페이지까지 자동 진입 후 텔레그램 알림."
     )
     try:
         await ensure_logged_in(page, notify=notify)
@@ -585,11 +590,19 @@ async def run_ktx_job(job, notify: Callable[..., Awaitable[None]]) -> dict[str, 
         await notify(f"🔐 [{job.id}] 인증 실패: {exc}")
         raise
 
-    policy = BackoffPolicy(
-        base=CFG.ktx.poll.base_interval_sec,
-        cap=CFG.ktx.poll.max_interval_sec,
-        jitter=CFG.ktx.poll.jitter_sec,
-    )
+    if aggressive:
+        policy = BackoffPolicy(
+            base=CFG.ktx.poll.aggressive_base_sec,
+            cap=CFG.ktx.poll.aggressive_cap_sec,
+            jitter=CFG.ktx.poll.aggressive_jitter_sec,
+            factor=1.05,    # 거의 평탄
+        )
+    else:
+        policy = BackoffPolicy(
+            base=CFG.ktx.poll.base_interval_sec,
+            cap=CFG.ktx.poll.max_interval_sec,
+            jitter=CFG.ktx.poll.jitter_sec,
+        )
 
     # ---- one search-and-attempt round, returns booking or None ----------
     async def attempt_standard() -> Optional[dict[str, Any]]:
@@ -606,6 +619,26 @@ async def run_ktx_job(job, notify: Callable[..., Awaitable[None]]) -> dict[str, 
             )
             if booked:
                 return booked
+        return None
+
+    async def attempt_any() -> Optional[dict[str, Any]]:
+        """가장 빠른 좌석 1개 — 일반실 우선, 안 되면 같은 열차의 특실 즉시 시도.
+        대기 / hold 로직 없이 잡히는 즉시 결제 페이지로 진입한다."""
+        rows = await search_trains(
+            page, origin=origin, destination=destination, date=date, time_str=time_str
+        )
+        cands = [r for r in rows if _within_window(r["depart"], time_str, window)]
+        cands.sort(key=lambda r: _time_distance(r["depart"], time_str))
+        for row in cands:
+            for cls, key in (("standard", "standard_available"), ("first", "first_class_available")):
+                if not row[key]:
+                    continue
+                booked = await _try_book_row(
+                    page, row, seat_class=cls,
+                    preferred_columns=preferred_cols if cls == "standard" else ["A", "D"],
+                )
+                if booked:
+                    return booked
         return None
 
     async def attempt_first_class() -> Optional[dict[str, Any]]:
@@ -673,7 +706,16 @@ async def run_ktx_job(job, notify: Callable[..., Awaitable[None]]) -> dict[str, 
         if attempt_no % 10 == 0:
             await notify(f"⏳ [{job.id}] {attempt_no}회차 폴링, 다음 {delay:.0f}s 후")
 
-    if strategy == "first_class_only":
+    if strategy in ("any", "fast"):
+        # 가장 빠른 좌석 1개 — 사용자 요구의 기본 모드.
+        booked = await infinite_poll(
+            target=attempt_any,
+            policy=policy,
+            deadline_sec=deadline,
+            on_attempt=progress,
+            cancel_event=job.cancel_event,
+        )
+    elif strategy == "first_class_only":
         booked = await infinite_poll(
             target=attempt_first_class,
             policy=policy,
@@ -770,10 +812,11 @@ async def run_ktx_job(job, notify: Callable[..., Awaitable[None]]) -> dict[str, 
             )
     else:
         await notify(
-            f"🎯 [{job.id}] 결제 페이지까지 도달!\n"
-            f"   {booked['train_no']} {booked['depart']}→{booked['arrive']}\n"
-            f"   {booked['class']} {booked['seat']}\n"
-            f"화면에서 결제 수단을 선택하고 '결제하기' 를 눌러주세요. (좌석 ≈10분 유지)",
+            f"🎯 [{job.id}] 좌석 잡았습니다 — 결제 페이지 진입 완료!\n"
+            f"   🚄 {booked['train_no']}  {booked['depart']}→{booked['arrive']}\n"
+            f"   💺 {booked['class']} {booked['seat']}\n"
+            f"⏱️ 좌석 약 10분간 유지됩니다. PC 화면에서 결제수단 선택 → '결제하기' 클릭.\n"
+            f"🔗 https://www.letskorail.com/  (마이페이지 → 결제대기 승차권에서도 결제 가능)",
             photo_path=str(shot),
         )
 

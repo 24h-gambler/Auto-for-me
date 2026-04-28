@@ -49,6 +49,12 @@ class KTXPoll(BaseModel):
     jitter_sec: int = 5
     max_interval_sec: int = 90
     max_total_hours: int = 48
+    # aggressive=true 면 거의 일정 간격으로 빠르게 폴링 (봇 탐지 위험 ↑).
+    # 예매 오픈일 / 매진 임박 구간에 일시적으로 켜는 용도.
+    aggressive: bool = False
+    aggressive_base_sec: int = 4
+    aggressive_cap_sec: int = 12
+    aggressive_jitter_sec: int = 2
 
 
 class KTXConfig(BaseModel):

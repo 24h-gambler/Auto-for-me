@@ -81,12 +81,18 @@ TOOLS: list[dict[str, Any]] = [
                 "seat_class_strategy": {
                     "type": "string",
                     "enum": [
+                        "any",
                         "standard_first_then_first_class_hold",
                         "standard_only",
                         "first_class_only",
                     ],
-                    "default": "standard_first_then_first_class_hold",
-                    "description": "기본은 일반실 우선, 매진 시 특실 임시 확보(8분).",
+                    "default": "any",
+                    "description": "any = 일반실/특실 가리지 않고 가장 먼저 잡히는 좌석 즉시 확보 (추천). 사용자가 특정 등급만 원할 때만 다른 값 사용.",
+                },
+                "aggressive": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "예매오픈일/매진임박 시 true. 약 4초 간격 폴링 (탐지위험 ↑).",
                 },
                 "preferred_columns": {
                     "type": "array",

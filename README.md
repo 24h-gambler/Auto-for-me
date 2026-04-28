@@ -50,16 +50,49 @@ cp config.example.yaml config.yaml
 python -m src.main
 ```
 
+## 💸 100% 무료로 KTX 만 돌리기 (Anthropic API 불필요)
+
+자유채팅 / 쿠팡 분석에만 Claude API 가 필요합니다. **KTX 예매는 슬래시 명령으로 직접
+부탁하면 API 호출이 0회** 발생하며, `.env` 의 `ANTHROPIC_API_KEY` 를 비워두어도 됩니다.
+
+필요한 것 (전부 무료):
+- 자기 PC / 노트북 / 라즈베리파이 — 전기료만
+- Telegram 봇 토큰 — `@BotFather` 에서 무료 발급
+- letskorail.com 계정 — 무료
+- (선택) Oracle Cloud Always Free / Fly.io — PC 가 없을 때
+
+`.env` 최소 설정:
+```bash
+ANTHROPIC_API_KEY=                       # 비워둬도 됨 (KTX 슬래시 명령에는 불필요)
+TELEGRAM_BOT_TOKEN=123456:ABC...
+TELEGRAM_ALLOWED_CHAT_IDS=11111111
+KORAIL_ID=your_korail_id
+KORAIL_PW=your_korail_pw
+HEADLESS=false                           # 결제 페이지 직접 보려면 false
+USER_DATA_DIR=./state/profile
+```
+
+운영:
+```bash
+python -m src.main
+# 텔레그램에서:
+/start
+/book 서울 부산 2026-05-10 09:00 120     ← 빠른 폴링, 좌석 잡히면 결제 페이지로
+/jobs                                    ← 진행 상황
+```
+
 ## 텔레그램 명령어
 
 | 명령 | 설명 |
 |---|---|
-| `/ktx 서울→부산 2026-05-10 09:00 ±2h` | 09시 전후 2시간 내 매진 풀릴 때까지 무한 폴링 후 예매 |
-| `/ktx_status` | 현재 진행 중인 KTX 작업 상태 |
-| `/ktx_cancel <id>` | 작업 취소 |
-| `/coupang 무선 마우스 5만원 이하 사무용` | 자연어 요구 → 리뷰 가중치 분석 후 Top 3 추천 |
-| `/captcha <코드>` | 봇이 캡차를 만나면 텔레그램으로 스크린샷 전송 → 사용자가 입력 |
-| (자유 채팅) | Claude 가 의도 파악해 적절한 작업 수행 |
+| `/book 서울 부산 2026-05-10 09:00 120` | 빠른 폴링 + 일반/특실 가리지 않고 가장 먼저 잡히는 좌석 즉시 확보 → 결제 페이지 진입 (추천) |
+| `/ktx 서울 부산 2026-05-10 09:00 120 !` | `/book` 과 동일 (`!` = 빠른 폴링) |
+| `/ktx 서울 부산 2026-05-10 09:00 120` | 보통 폴링 (8~90초 백오프) |
+| `/watch 서울 부산 2026-05-10 09:00 120` | PC 꺼져있을 때 GitHub Actions 가 좌석 감시 → 알림 |
+| `/jobs` / `/cancel <id>` | 작업 목록 / 취소 |
+| `/captcha <코드>` | 캡차 발생 시 봇이 스크린샷 전송 → 5분 안에 입력 |
+| `/coupang ...` | 쿠팡 추천 (Anthropic API 키 필요) |
+| (자유 채팅) | Claude 가 의도 파악 (Anthropic API 키 필요) |
 
 ## 프로젝트 구조
 

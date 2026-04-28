@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from pathlib import Path
 
@@ -90,10 +91,27 @@ def check_playwright() -> tuple[bool, str]:
         import playwright  # noqa: F401
     except Exception as exc:  # noqa: BLE001
         return False, f"playwright 미설치 ({exc}) → pip install -r requirements.txt"
-    cache = Path.home() / ".cache" / "ms-playwright"
-    if not cache.exists() or not any(cache.glob("chromium-*")):
-        return False, "chromium 미설치 → playwright install chromium"
-    return True, "playwright + chromium 준비됨"
+
+    # OS 별로 Playwright 의 브라우저 캐시 경로가 다름.
+    candidates: list[Path] = []
+    env_path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+    if env_path and env_path not in ("0", "1"):
+        candidates.append(Path(env_path))
+    if sys.platform.startswith("win"):
+        local = os.environ.get("LOCALAPPDATA")
+        if local:
+            candidates.append(Path(local) / "ms-playwright")
+        candidates.append(Path.home() / "AppData" / "Local" / "ms-playwright")
+    elif sys.platform == "darwin":
+        candidates.append(Path.home() / "Library" / "Caches" / "ms-playwright")
+    else:  # linux 등
+        candidates.append(Path.home() / ".cache" / "ms-playwright")
+
+    for cache in candidates:
+        if cache.exists() and any(cache.glob("chromium-*")):
+            return True, f"playwright + chromium 준비됨 ({cache})"
+    paths_tried = ", ".join(str(c) for c in candidates) or "(없음)"
+    return False, f"chromium 미설치 — 검색한 경로: {paths_tried}"
 
 
 async def main() -> int:

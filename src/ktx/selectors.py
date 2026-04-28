@@ -6,20 +6,42 @@ Korail (www.letskorail.com) DOM selectors.
    (전체 부킹 흐름은 booker.py 가 담당)
 """
 
-# 로그인
-LOGIN_URL = "https://www.letskorail.com/korail/com/login.do"
-ID_INPUT = "input#txtMember"
-PW_INPUT = "input#txtPwd"
-LOGIN_BTN = "input.loginBtn, button#loginDisplay1"
+# ── URL (2026 개편 신 사이트) ───────────────────────────────────────
+HOME_URL = "https://www.korail.com/"
+LOGIN_URL = "https://www.korail.com/login"          # ※ 실제 경로 미확인 — 본인 검증 필요
+TICKET_MAIN_URL = "https://www.korail.com/ticket/main"
+SEARCH_URL = "https://www.korail.com/ticket/search/general"
 
-# 메인 / 예매 폼
-HOME_URL = "https://www.letskorail.com/"
-SEARCH_URL = "https://www.letskorail.com/ebizprd/main.do"
-DEPT_INPUT = "input[name='txtGoStart']"
-ARRV_INPUT = "input[name='txtGoEnd']"
-DATE_INPUT = "input[name='txtGoDate']"
-TIME_SELECT = "select[name='txtGoTime']"
-SEARCH_BTN = "a.btn_search, input[name='search']"
+# ── 로그인 입력 (※ 실제 selector 미확인 — 새 사이트 HTML 받은 뒤 갱신) ──
+ID_INPUT = "input[name='memberId'], input#memberId, input[type='text']"
+PW_INPUT = "input[name='password'], input#password, input[type='password']"
+LOGIN_BTN = "button[type='submit'], a.btn_login, button:has-text('로그인')"
+
+# ── 검색 폼 — 새 사이트는 팝업 기반 ─────────────────────────────────
+# 옛날처럼 input 에 타이핑하는 게 아니라, 버튼 → 팝업 → 역 선택 흐름.
+# 사용자가 확인해준 출발역 팝업 트리거 버튼:
+#   <a class="btn_pop btn_end btn_pop-open"><span class="blind">출발역 선택</span></a>
+DEPT_OPEN_BTN = "a.btn_pop-open:has(span:has-text('출발역')), .btn_pop:has-text('출발역 선택')"
+ARRV_OPEN_BTN = "a.btn_pop-open:has(span:has-text('도착역')), .btn_pop:has-text('도착역 선택')"
+# 팝업 내 역 검색 input + 역 클릭 + 확인 버튼 — HTML 받으면 갱신.
+STATION_SEARCH_INPUT = "input[type='search'], input[placeholder*='역']"
+STATION_LIST_ITEM = "li[data-station], li.station_item, button.station, a.station"
+STATION_CONFIRM_BTN = "button:has-text('확인'), a:has-text('확인'), button:has-text('선택')"
+
+# 날짜 / 시간 / 검색 버튼 — HTML 받으면 갱신.
+DATE_OPEN_BTN = "a.btn_pop-open:has-text('출발일'), button:has-text('출발일')"
+TIME_OPEN_BTN = "a.btn_pop-open:has-text('시간'), button:has-text('시간')"
+SEARCH_BTN = (
+    "button.btn_search, a.btn_search, "
+    "button:has-text('조회하기'), button:has-text('조회'), "
+    "button:has-text('승차권 검색'), button[type='submit']"
+)
+
+# 옛 site 호환을 위한 alias — 기존 booker 코드가 참조 중.
+DEPT_INPUT = DEPT_OPEN_BTN
+ARRV_INPUT = ARRV_OPEN_BTN
+DATE_INPUT = DATE_OPEN_BTN
+TIME_SELECT = TIME_OPEN_BTN
 
 # 결과 테이블 — 코레일은 id 가 변경된 적 있어 후보 둘 다 매칭.
 RESULT_ROWS = (

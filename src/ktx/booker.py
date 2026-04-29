@@ -971,6 +971,67 @@ _DISMISS_ERROR_JS = """
 """
 
 
+# 예매 버튼 클릭 후 페이지 상태 — 4가지 중 하나로 분류.
+#
+#   refund_policy : '환불(반환) 위약금 안내' 팝업 보임 → 예매 진행 정상.
+#                   이 팝업 떠야 진짜 성공 신호. '확인' 누르고 다음 단계로.
+#   error         : '통신 중 오류' / '시스템 오류' 등 → 실패, 다시 시도.
+#   taken         : '이미 다른 분이...' 등 → race 패배, 다른 좌석 찾기.
+#   unknown       : 명확한 신호 없음 (일시 전환 중 가능성) → 짧게 재확인.
+_POST_RESERVE_STATE_JS = """
+() => {
+  const txt = ((document.body && document.body.innerText) || '').slice(0, 8000);
+
+  // 1) 환불(반환) 위약금 안내 = 예매 진행 정상의 강력한 신호.
+  //    이게 뜨지 않으면 절대 '잡혔다' 알림 보내지 말 것.
+  if (
+    txt.includes('환불(반환) 위약금') ||
+    txt.includes('환불(반환)위약금') ||
+    txt.includes('환불 위약금 안내') ||
+    (txt.includes('환불') && txt.includes('위약금') && txt.includes('출발'))
+  ) return 'refund_policy';
+
+  // 2) 통신 / 시스템 오류 — 다양한 표현 매칭.
+  if (
+    txt.includes('통신 중 오류') ||
+    txt.includes('통신중 오류') ||
+    txt.includes('오류가 발생') ||
+    txt.includes('잠시 후 다시') ||
+    txt.includes('시스템 오류') ||
+    txt.includes('처리 중 오류') ||
+    txt.includes('서비스 처리 중 오류') ||
+    txt.includes('일시적인 오류')
+  ) return 'error';
+
+  // 3) 이미 다른 사람이 / 매진 — race 패배.
+  if (
+    (txt.includes('이미') && (txt.includes('다른') || txt.includes('예약'))) ||
+    txt.includes('매진되었')  ||
+    txt.includes('남아있지 않')
+  ) return 'taken';
+
+  return 'unknown';
+}
+"""
+
+
+# 환불 위약금 팝업의 '확인' 버튼 누르기 (성공 path).
+_REFUND_POLICY_OK_JS = """
+() => {
+  // 가장 흔한 패턴: <button>확인</button> 또는 <a>확인</a>.
+  for (const el of document.querySelectorAll('button, a')) {
+    if (el.offsetParent === null) continue;
+    const t = (el.innerText || '').trim();
+    if (t === '확인') {
+      el.click();
+      return true;
+    }
+  }
+  return false;
+}
+"""
+
+
 _BLOCK_CHECK_JS = """
 () => {
   const t = (document.body && document.body.innerText) || '';
@@ -1316,62 +1377,88 @@ async def refresh_and_click_loop(
                 except Exception:
                     pass
 
-            # 4.7) 예매 직후 통신 오류 팝업 감지 — 뜨면 예약 안 된 것이므로
-            # 팝업 닫고 즉시 다음 F5 사이클로 (잡힘 알림 보내지 않음).
-            await asyncio.sleep(random.uniform(0.6, 1.2))   # 팝업/응답 시간
+            # 4.7) 예매 클릭 후 페이지 상태 — 4가지로 분류해 정확히 판단.
+            # 핵심: '환불(반환) 위약금 안내' 팝업이 떠야 진짜 성공.
+            #       그 전엔 절대 '잡았다' 알림 보내지 말 것.
+            await asyncio.sleep(random.uniform(0.6, 1.2))
             try:
-                has_error = await page.evaluate(_RESERVE_ERROR_JS)
+                outcome = await page.evaluate(_POST_RESERVE_STATE_JS)
             except Exception:
-                has_error = False
+                outcome = "unknown"
 
-            if has_error:
-                consecutive_reserve_errors += 1
-                log.warning(
-                    "hyper.reserve_communication_error",
-                    text=result.get("cell_text", ""),
-                    consecutive=consecutive_reserve_errors,
-                )
+            # 'unknown' 이면 0.5초 더 기다려 한 번 더 확인 (전환 중 가능성).
+            if outcome == "unknown":
+                await asyncio.sleep(random.uniform(0.4, 0.8))
+                try:
+                    outcome = await page.evaluate(_POST_RESERVE_STATE_JS)
+                except Exception:
+                    outcome = "unknown"
+
+            log.info("hyper.post_reserve_outcome", outcome=outcome,
+                     cell=result.get("cell_text", "")[:60])
+
+            # ── 성공 path ─────────────────────────────────────────────
+            if outcome == "refund_policy":
+                # 환불 위약금 팝업의 '확인' 누르고 결제 페이지로 진행.
+                consecutive_reserve_errors = 0
+                try:
+                    await page.evaluate(_REFUND_POLICY_OK_JS)
+                    await asyncio.sleep(0.4)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("hyper.refund_ok_click_failed", err=str(exc))
+                return await _try_finalize(result, reserve_clicked)
+
+            # ── race 패배 ────────────────────────────────────────────
+            if outcome == "taken":
+                log.info("hyper.race_lost")
                 try:
                     await page.evaluate(_DISMISS_ERROR_JS)
                 except Exception:
                     pass
-
-                # 적응형 응답 — 오류가 누적될수록 더 강하게 정리.
-                if consecutive_reserve_errors >= 5:
-                    # 5회 연속 = 봇 의심 / 세션 stale 가능성 매우 높음.
-                    # 캐시 + sessionStorage 정리 + 하드 리프레시 + 30초 쉼.
-                    now = asyncio.get_event_loop().time()
-                    if now - last_ping > 60:
-                        await notify(
-                            f"🛑 [{job.id}] 통신 오류 {consecutive_reserve_errors}회 연속 — "
-                            f"세션 리프레시 + 30초 휴식. (봇 의심 회피)"
-                        )
-                        last_ping = now
-                    await _hard_refresh(page)
-                    last_cache_flush = asyncio.get_event_loop().time()
-                    await asyncio.sleep(random.uniform(25, 35))
-                    consecutive_reserve_errors = 0
-                elif consecutive_reserve_errors >= 3:
-                    # 3회 연속 = 캐시 가벼운 정리 + 5~10초 쉼.
-                    log.info("hyper.cache_flush_due_to_errors")
-                    await _flush_cache(page)
-                    last_cache_flush = asyncio.get_event_loop().time()
-                    await asyncio.sleep(random.uniform(5, 10))
-                else:
-                    # 1~2회 = 단순 race 패배일 가능성. 짧은 쉼 후 재시도.
-                    now = asyncio.get_event_loop().time()
-                    if now - last_ping > 60:
-                        await notify(
-                            f"⚠️ [{job.id}] 예매 통신 오류 — 다시 시도 중.\n"
-                            f"   (보통 다른 사람이 0.05초 먼저 가져간 경우 발생)"
-                        )
-                        last_ping = now
-                    await asyncio.sleep(random.uniform(1.0, 2.0))
+                # race 패배는 우리 잘못 아님 → consecutive 카운터 안 올림.
+                await asyncio.sleep(random.uniform(0.5, 1.2))
                 continue
 
-            # 통신 오류 없이 성공적으로 도달 → 카운터 리셋.
-            consecutive_reserve_errors = 0
-            return await _try_finalize(result, reserve_clicked)
+            # ── 통신/시스템 오류 또는 미상 ──────────────────────────
+            consecutive_reserve_errors += 1
+            log.warning(
+                "hyper.reserve_failed",
+                outcome=outcome,
+                consecutive=consecutive_reserve_errors,
+            )
+            try:
+                await page.evaluate(_DISMISS_ERROR_JS)
+            except Exception:
+                pass
+
+            # 적응형 응답.
+            if consecutive_reserve_errors >= 5:
+                now = asyncio.get_event_loop().time()
+                if now - last_ping > 60:
+                    await notify(
+                        f"🛑 [{job.id}] 예매 실패 {consecutive_reserve_errors}회 연속 — "
+                        f"세션 리프레시 + 30초 휴식. (봇 의심 회피)"
+                    )
+                    last_ping = now
+                await _hard_refresh(page)
+                last_cache_flush = asyncio.get_event_loop().time()
+                await asyncio.sleep(random.uniform(25, 35))
+                consecutive_reserve_errors = 0
+            elif consecutive_reserve_errors >= 3:
+                log.info("hyper.cache_flush_due_to_errors")
+                await _flush_cache(page)
+                last_cache_flush = asyncio.get_event_loop().time()
+                await asyncio.sleep(random.uniform(5, 10))
+            else:
+                now = asyncio.get_event_loop().time()
+                if now - last_ping > 60:
+                    label = "통신 오류" if outcome == "error" else "예매 실패 (상태 미상)"
+                    await notify(
+                        f"⚠️ [{job.id}] {label} — 다시 시도 중."
+                    )
+                    last_ping = now
+                await asyncio.sleep(random.uniform(1.0, 2.0))
+            continue
 
         # 5) 진행 알림 — 15분에 한 번만 (스팸 방지). 잡힘 알림은 즉시.
         if now - last_ping > 900:

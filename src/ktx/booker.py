@@ -1054,6 +1054,39 @@ _LOAD_MORE_JS = """
 """
 
 
+async def _flush_cache(page: Page) -> None:
+    """HTTP 캐시 + sessionStorage 정리. 인증 쿠키와 localStorage 는 보존
+    (날리면 로그아웃됨). 누적된 stale 데이터/토큰 비우기 위함."""
+    # 1) HTTP 캐시 — CDP 통해 직접 비움.
+    try:
+        client = await page.context.new_cdp_session(page)
+        await client.send("Network.clearBrowserCache")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("flush.http_cache_failed", err=str(exc))
+    # 2) sessionStorage — 페이지별 임시 상태. 비워도 인증엔 영향 없음.
+    try:
+        await page.evaluate("() => { try { sessionStorage.clear(); } catch (e) {} }")
+    except Exception:
+        pass
+
+
+async def _hard_refresh(page: Page) -> None:
+    """캐시 정리 + 같은 URL 재방문 (page.reload 보다 강한 cache bypass)."""
+    await _flush_cache(page)
+    try:
+        url = page.url
+        # cache buster 파라미터를 URL 에 붙여 새 요청으로 만듦.
+        sep = "&" if "?" in url else "?"
+        bust_url = f"{url}{sep}_={int(asyncio.get_event_loop().time() * 1000)}"
+        await page.goto(bust_url, wait_until="domcontentloaded", timeout=20000)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("hard_refresh.failed", err=str(exc))
+        try:
+            await page.reload(wait_until="domcontentloaded", timeout=15000)
+        except Exception:
+            pass
+
+
 async def refresh_and_click_loop(
     job, notify: Callable[..., Awaitable[None]],
 ) -> dict[str, Any]:
@@ -1094,7 +1127,9 @@ async def refresh_and_click_loop(
     started = asyncio.get_event_loop().time()
     attempt = 0
     last_ping = started
-    consecutive_errors = 0
+    consecutive_errors = 0          # reload 실패 카운터
+    consecutive_reserve_errors = 0  # 통신 오류 (예매 거부) 연속 카운터
+    last_cache_flush = started      # 마지막 캐시 flush 시각
 
     async def _try_finalize(result: dict[str, Any], reserve_clicked: bool) -> dict[str, Any]:
         """좌석 잡혔다 — 비상 알림 연속 발사 + 결제 페이지까지 진입."""
@@ -1151,6 +1186,12 @@ async def refresh_and_click_loop(
         now = asyncio.get_event_loop().time()
         if now - started > deadline:
             raise TimeoutError("HYPER 모드가 max_total_hours 를 초과했습니다.")
+
+        # 0.5) 5분마다 자동 캐시 flush — stale 토큰/캐시 누적 방지.
+        if asyncio.get_event_loop().time() - last_cache_flush > 300:
+            await _flush_cache(page)
+            last_cache_flush = asyncio.get_event_loop().time()
+            log.info("hyper.periodic_cache_flush")
 
         # 1) 새로고침 (F5)
         try:
@@ -1284,24 +1325,52 @@ async def refresh_and_click_loop(
                 has_error = False
 
             if has_error:
-                log.warning("hyper.reserve_communication_error",
-                            text=result.get("cell_text", ""))
+                consecutive_reserve_errors += 1
+                log.warning(
+                    "hyper.reserve_communication_error",
+                    text=result.get("cell_text", ""),
+                    consecutive=consecutive_reserve_errors,
+                )
                 try:
                     await page.evaluate(_DISMISS_ERROR_JS)
                 except Exception:
                     pass
-                # 너무 자주는 알리지 않음 (60초 쿨다운).
-                now = asyncio.get_event_loop().time()
-                if now - last_ping > 60:
-                    await notify(
-                        f"⚠️ [{job.id}] 예매 시도했으나 코레일 통신 오류 — 다시 시도 중.\n"
-                        f"   (보통 좌석을 다른 사람이 0.05초 먼저 가져간 경우 발생)"
-                    )
-                    last_ping = now
-                # 짧은 cooldown 후 다음 F5 (서버 안정 시간).
-                await asyncio.sleep(random.uniform(1.0, 2.0))
+
+                # 적응형 응답 — 오류가 누적될수록 더 강하게 정리.
+                if consecutive_reserve_errors >= 5:
+                    # 5회 연속 = 봇 의심 / 세션 stale 가능성 매우 높음.
+                    # 캐시 + sessionStorage 정리 + 하드 리프레시 + 30초 쉼.
+                    now = asyncio.get_event_loop().time()
+                    if now - last_ping > 60:
+                        await notify(
+                            f"🛑 [{job.id}] 통신 오류 {consecutive_reserve_errors}회 연속 — "
+                            f"세션 리프레시 + 30초 휴식. (봇 의심 회피)"
+                        )
+                        last_ping = now
+                    await _hard_refresh(page)
+                    last_cache_flush = asyncio.get_event_loop().time()
+                    await asyncio.sleep(random.uniform(25, 35))
+                    consecutive_reserve_errors = 0
+                elif consecutive_reserve_errors >= 3:
+                    # 3회 연속 = 캐시 가벼운 정리 + 5~10초 쉼.
+                    log.info("hyper.cache_flush_due_to_errors")
+                    await _flush_cache(page)
+                    last_cache_flush = asyncio.get_event_loop().time()
+                    await asyncio.sleep(random.uniform(5, 10))
+                else:
+                    # 1~2회 = 단순 race 패배일 가능성. 짧은 쉼 후 재시도.
+                    now = asyncio.get_event_loop().time()
+                    if now - last_ping > 60:
+                        await notify(
+                            f"⚠️ [{job.id}] 예매 통신 오류 — 다시 시도 중.\n"
+                            f"   (보통 다른 사람이 0.05초 먼저 가져간 경우 발생)"
+                        )
+                        last_ping = now
+                    await asyncio.sleep(random.uniform(1.0, 2.0))
                 continue
 
+            # 통신 오류 없이 성공적으로 도달 → 카운터 리셋.
+            consecutive_reserve_errors = 0
             return await _try_finalize(result, reserve_clicked)
 
         # 5) 진행 알림 — 15분에 한 번만 (스팸 방지). 잡힘 알림은 즉시.

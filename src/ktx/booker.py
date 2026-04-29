@@ -1242,20 +1242,42 @@ async def refresh_and_click_loop(
             result = None
 
         if result:
-            # 4) 예매 버튼 즉시 클릭 (JS, 등장할 때까지 짧은 폴링)
+            # 4) 셀 클릭 직후 — 사람이 패널 보고 잠깐 읽는 시간 모방.
+            #    "셀 클릭 → 즉시 예매 클릭" 패턴이 너무 빠르면 코레일이
+            #    '통신 중 오류' 로 거부. 0.4~0.9초 랜덤 대기.
+            await asyncio.sleep(random.uniform(0.4, 0.9))
+
+            # 4.5) 예매 버튼 클릭 — Playwright 의 진짜 마우스 클릭 사용.
+            #    (mousedown/mouseup 까지 발생, JS .click() 보다 인간적)
+            #    JS click 은 fallback.
             reserve_clicked = False
-            for _ in range(20):  # 최대 ~2초
+            for attempt in range(15):  # 최대 ~1.5초 폴링
                 try:
-                    if await page.evaluate(_RESERVE_BTN_JS):
-                        reserve_clicked = True
-                        break
+                    btn = page.locator(
+                        "button.reservbtn:not([disabled]), "
+                        "button.btn_bn-blue02:not([disabled])"
+                    ).first
+                    if await btn.count():
+                        # is_visible 체크 후 진짜 마우스 클릭.
+                        if await btn.is_visible():
+                            await btn.click(delay=random.randint(50, 130), timeout=2500)
+                            reserve_clicked = True
+                            break
                 except Exception:
                     pass
                 await asyncio.sleep(0.1)
 
-            # 4.5) 예매 직후 통신 오류 팝업 감지 — 뜨면 예약 안 된 것이므로
+            # JS fallback — Playwright 클릭 실패 시.
+            if not reserve_clicked:
+                try:
+                    if await page.evaluate(_RESERVE_BTN_JS):
+                        reserve_clicked = True
+                except Exception:
+                    pass
+
+            # 4.7) 예매 직후 통신 오류 팝업 감지 — 뜨면 예약 안 된 것이므로
             # 팝업 닫고 즉시 다음 F5 사이클로 (잡힘 알림 보내지 않음).
-            await asyncio.sleep(0.6)   # 팝업 뜰 시간 짧게 대기
+            await asyncio.sleep(random.uniform(0.6, 1.2))   # 팝업/응답 시간
             try:
                 has_error = await page.evaluate(_RESERVE_ERROR_JS)
             except Exception:
@@ -1272,11 +1294,12 @@ async def refresh_and_click_loop(
                 now = asyncio.get_event_loop().time()
                 if now - last_ping > 60:
                     await notify(
-                        f"⚠️ [{job.id}] 예매 시도했으나 코레일 통신 오류 — 다시 시도 중."
+                        f"⚠️ [{job.id}] 예매 시도했으나 코레일 통신 오류 — 다시 시도 중.\n"
+                        f"   (보통 좌석을 다른 사람이 0.05초 먼저 가져간 경우 발생)"
                     )
                     last_ping = now
-                # 다음 F5 사이클로.
-                await asyncio.sleep(0.4)
+                # 짧은 cooldown 후 다음 F5 (서버 안정 시간).
+                await asyncio.sleep(random.uniform(1.0, 2.0))
                 continue
 
             return await _try_finalize(result, reserve_clicked)

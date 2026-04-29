@@ -112,9 +112,21 @@ class BrowserPool:
         )
 
     async def _start_launch(self) -> None:
-        """기본 — Playwright 가 chromium 을 직접 띄움."""
+        """기본 — Playwright 가 chromium 을 직접 띄움.
+        새 코레일은 이 모드를 즉시 차단함. CDP 모드 (CHROME_CDP_URL) 권장."""
         assert self.pw
-        user_dir = Path(ENV.user_data_dir).resolve()
+        # 사용자에게 명확히 안내.
+        log.warning(
+            "browser.using_launch_mode",
+            note=(
+                ".env 에 CHROME_CDP_URL 이 비어있어 봇이 chromium 을 직접 띄웁니다. "
+                "새 코레일 사이트는 이 모드를 차단할 가능성이 높습니다. "
+                "scripts/launch_chrome.sh (Mac) 또는 scripts/launch_chrome.ps1 (Win) 으로 "
+                "진짜 Chrome 을 띄우고 .env 에 CHROME_CDP_URL=http://127.0.0.1:9222 추가하세요."
+            ),
+        )
+        user_dir_raw = (ENV.user_data_dir or "./state/profile").strip()
+        user_dir = Path(user_dir_raw).resolve()
         user_dir.mkdir(parents=True, exist_ok=True)
 
         launch_kwargs = {

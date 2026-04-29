@@ -81,9 +81,21 @@ async def check_telegram(token: str, chat_id: str) -> tuple[bool, str]:
 
 
 def check_korail(env: dict) -> tuple[bool, str]:
+    """KORAIL_ID/PW 는 /refresh (CDP) 모드에서 미사용 — 비어있어도 OK."""
     if not (env.get("KORAIL_ID") and env.get("KORAIL_PW")):
-        return False, "KORAIL_ID / KORAIL_PW 비어있음 — letskorail.com 계정 정보 입력"
-    return True, f"KORAIL_ID={env['KORAIL_ID'][:3]}*** 설정됨 (실제 로그인은 봇 가동 시 검증)"
+        return True, "비어있음 (/refresh 모드만 쓰면 불필요)"
+    return True, f"KORAIL_ID={env['KORAIL_ID'][:3]}*** 설정됨 (옛 /book 모드용)"
+
+
+def check_cdp(env: dict) -> tuple[bool, str]:
+    """CHROME_CDP_URL — /refresh 모드 핵심. 비어있으면 새 코레일에 막힘."""
+    url = env.get("CHROME_CDP_URL", "")
+    if not url:
+        return False, (
+            "비어있음 — /refresh 모드 동작 안 함. "
+            ".env 에 CHROME_CDP_URL=http://127.0.0.1:9222 추가."
+        )
+    return True, f"{url} 설정됨"
 
 
 def check_playwright() -> tuple[bool, str]:
@@ -140,13 +152,19 @@ async def main() -> int:
     if not ok:
         fails += 1
 
-    print("3) Korail .................", end=" ")
+    print("3) Korail (옛 모드용) .....", end=" ")
     ok, msg = check_korail(env)
     print(("✅ " if ok else "❌ ") + msg)
     if not ok:
         fails += 1
 
-    print("4) Playwright .............", end=" ")
+    print("4) CHROME_CDP_URL .........", end=" ")
+    ok, msg = check_cdp(env)
+    print(("✅ " if ok else "❌ ") + msg)
+    if not ok:
+        fails += 1
+
+    print("5) Playwright .............", end=" ")
     ok, msg = check_playwright()
     print(("✅ " if ok else "❌ ") + msg)
     if not ok:

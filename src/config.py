@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import List
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -20,6 +20,8 @@ class Env(BaseSettings):
     telegram_bot_token: str = Field(..., alias="TELEGRAM_BOT_TOKEN")
     telegram_allowed_chat_ids: str = Field("", alias="TELEGRAM_ALLOWED_CHAT_IDS")
 
+    # /refresh 모드 (CDP) 에서는 사용자가 직접 로그인하므로 미사용.
+    # 옛 /book / /ktx 자동 로그인 모드를 쓸 때만 필요.
     korail_id: str = Field("", alias="KORAIL_ID")
     korail_pw: str = Field("", alias="KORAIL_PW")
 
@@ -36,6 +38,25 @@ class Env(BaseSettings):
 
     orchestrator_model: str = Field("claude-opus-4-7", alias="ORCHESTRATOR_MODEL")
     analyzer_model: str = Field("claude-sonnet-4-6", alias="ANALYZER_MODEL")
+
+    # 모든 문자열 필드의 공백/주석 잔재를 자동으로 trim — .env 에 인라인 주석이
+    # 남아있어도 안전. 'value  # comment' → 'value'.
+    @field_validator(
+        "anthropic_api_key", "telegram_bot_token", "telegram_allowed_chat_ids",
+        "korail_id", "korail_pw", "user_data_dir", "proxy_url",
+        "chrome_cdp_url", "orchestrator_model", "analyzer_model",
+        mode="before",
+    )
+    @classmethod
+    def _strip_and_decomment(cls, v):
+        if not isinstance(v, str):
+            return v
+        v = v.strip()
+        # 인라인 주석 (' # ...' 또는 '#...') 제거. 토큰에는 # 가 없으므로 안전.
+        # 단, 라인이 '#' 으로 시작하면 위에서 .env 파서가 이미 무시.
+        if "#" in v:
+            v = v.split("#", 1)[0].strip()
+        return v.strip('"').strip("'")
 
     @property
     def allowed_chat_ids(self) -> List[int]:

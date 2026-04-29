@@ -929,6 +929,48 @@ _RESERVE_BTN_JS = """
 """
 
 
+# 예매 버튼 클릭 직후 코레일이 띄우는 통신 오류 팝업 감지.
+# 이게 뜨면 예약은 안 된 상태 — 팝업 닫고 다음 F5 사이클로.
+_RESERVE_ERROR_JS = """
+() => {
+  const txt = ((document.body && document.body.innerText) || '').slice(0, 8000);
+  if (
+    txt.includes('통신 중 오류') ||
+    txt.includes('통신중 오류') ||
+    txt.includes('오류가 발생') ||
+    txt.includes('잠시 후 다시') ||
+    txt.includes('시스템 오류') ||
+    txt.includes('처리 중 오류') ||
+    txt.includes('서비스 처리 중 오류') ||
+    txt.includes('일시적인 오류')
+  ) return true;
+  return false;
+}
+"""
+
+
+# 통신 오류 팝업의 '확인' / '닫기' 버튼 누르기.
+_DISMISS_ERROR_JS = """
+() => {
+  // 1순위: 텍스트로 매칭 ('확인' / '닫기').
+  for (const el of document.querySelectorAll('button, a')) {
+    if (el.offsetParent === null) continue;
+    const t = (el.innerText || '').trim();
+    if (t === '확인' || t === '닫기' || t === 'OK') {
+      el.click();
+      return true;
+    }
+  }
+  // 2순위: 흔한 닫기 class.
+  const closer = document.querySelector(
+    '.btn_close, .popup_close, .layer_close, [aria-label="close"], [aria-label="닫기"]'
+  );
+  if (closer) { closer.click(); return true; }
+  return false;
+}
+"""
+
+
 _BLOCK_CHECK_JS = """
 () => {
   const t = (document.body && document.body.innerText) || '';
@@ -1210,6 +1252,32 @@ async def refresh_and_click_loop(
                 except Exception:
                     pass
                 await asyncio.sleep(0.1)
+
+            # 4.5) 예매 직후 통신 오류 팝업 감지 — 뜨면 예약 안 된 것이므로
+            # 팝업 닫고 즉시 다음 F5 사이클로 (잡힘 알림 보내지 않음).
+            await asyncio.sleep(0.6)   # 팝업 뜰 시간 짧게 대기
+            try:
+                has_error = await page.evaluate(_RESERVE_ERROR_JS)
+            except Exception:
+                has_error = False
+
+            if has_error:
+                log.warning("hyper.reserve_communication_error",
+                            text=result.get("cell_text", ""))
+                try:
+                    await page.evaluate(_DISMISS_ERROR_JS)
+                except Exception:
+                    pass
+                # 너무 자주는 알리지 않음 (60초 쿨다운).
+                now = asyncio.get_event_loop().time()
+                if now - last_ping > 60:
+                    await notify(
+                        f"⚠️ [{job.id}] 예매 시도했으나 코레일 통신 오류 — 다시 시도 중."
+                    )
+                    last_ping = now
+                # 다음 F5 사이클로.
+                await asyncio.sleep(0.4)
+                continue
 
             return await _try_finalize(result, reserve_clicked)
 

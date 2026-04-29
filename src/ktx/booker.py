@@ -1098,19 +1098,14 @@ _PAGE_STATE_JS = """
 """
 
 
-# F5 후 더보기 N회 클릭 — 더 넓은 시간대를 한 번에 스캔하기 위함.
-_LOAD_MORE_JS = """
+# 행 개수 카운트 — 더보기 클릭 후 새 행이 정말 추가됐는지 검증용.
+_COUNT_ROWS_JS = """
 () => {
-  const more = document.querySelector('a.page_group') ||
-               Array.from(document.querySelectorAll('a')).find(a =>
-                 (a.innerText || '').trim() === '더보기'
-               );
-  if (more) {
-    more.scrollIntoView({behavior: 'instant', block: 'center'});
-    more.click();
-    return true;
+  let n = 0;
+  for (const a of document.querySelectorAll('a')) {
+    if (a.querySelector('p.txt_ch, .tck_etc_use')) n++;
   }
-  return false;
+  return n;
 }
 """
 
@@ -1321,20 +1316,79 @@ async def refresh_and_click_loop(
             await recover_from_block(page, marker="-8003/매크로", notify=notify, job_id=job.id)
             continue
 
-        # 2.7) 더보기 N회 펼치기 (사용자 옵션) — 각 클릭 후 새 행이 그려질 때까지 대기.
-        for _ in range(expand_count):
+        # 2.7) 더보기 N회 펼치기 (사용자 옵션).
+        # 위험 요소 다 잡음:
+        #  · 진짜 마우스 클릭 (mousedown/mouseup 발생)
+        #  · 클릭 후 행 개수 증가까지 대기 (단순 selector 존재 검사 X)
+        #  · 클릭이 큐를 트리거하면 큐 빠질 때까지 대기
+        #  · 클릭 사이 0.5~1.2초 랜덤 대기 (사람 모방)
+        for i in range(expand_count):
             try:
-                clicked_more = await page.evaluate(_LOAD_MORE_JS)
+                rows_before = await page.evaluate(_COUNT_ROWS_JS)
             except Exception:
-                clicked_more = False
-            if not clicked_more:
+                rows_before = 0
+
+            # Playwright 진짜 클릭 — JS .click() 보다 인간적.
+            try:
+                more_btn = page.locator(
+                    "a.page_group, a:has(span:text-is('더보기'))"
+                ).first
+                if not await more_btn.count():
+                    log.info("load_more.no_button", iter=i)
+                    break
+                if not await more_btn.is_visible():
+                    break
+                await more_btn.scroll_into_view_if_needed(timeout=2000)
+                await more_btn.click(delay=random.randint(50, 130), timeout=3000)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("load_more.click_failed", iter=i, err=str(exc))
                 break
-            # 새 행이 추가되는 데 대기 — 단순 sleep 보다 정확.
-            try:
-                await page.wait_for_function(_ROWS_RENDERED_JS, timeout=1500)
-            except Exception:
-                pass
-            await asyncio.sleep(0.1)   # 안전 여유
+
+            # 새 행이 추가될 때까지 대기 (최대 5초). 도중에 큐 뜨면 큐 풀릴 때까지.
+            sub_started = asyncio.get_event_loop().time()
+            new_rows = False
+            while asyncio.get_event_loop().time() - sub_started < 5.0:
+                try:
+                    sub_state = await page.evaluate(_PAGE_STATE_JS)
+                except Exception:
+                    sub_state = "unknown"
+
+                if sub_state == "block":
+                    log.warning("load_more.block_during_expand", iter=i)
+                    break  # 바깥 루프에서 회복
+
+                if sub_state == "queue":
+                    seen_queue = True
+                    await asyncio.sleep(0.4)
+                    continue
+
+                try:
+                    rows_now = await page.evaluate(_COUNT_ROWS_JS)
+                except Exception:
+                    rows_now = rows_before
+                if rows_now > rows_before:
+                    new_rows = True
+                    break
+                await asyncio.sleep(0.2)
+
+            if not new_rows:
+                log.info("load_more.no_new_rows", iter=i)
+                break
+
+            # 다음 더보기 클릭 전 사람 모방 랜덤 대기.
+            if i + 1 < expand_count:
+                await asyncio.sleep(random.uniform(0.5, 1.2))
+
+        # 더보기 다 끝난 후 차단 화면 한 번 더 검사 (반복 클릭이 트리거했을 수 있음).
+        try:
+            if await page.evaluate(_BLOCK_CHECK_JS):
+                await recover_from_block(
+                    page, marker="-8003/매크로 (더보기 후)",
+                    notify=notify, job_id=job.id,
+                )
+                continue
+        except Exception:
+            pass
 
         # 3) 스캔 + 클릭 (단일 JS 호출 — 가장 빠름)
         try:

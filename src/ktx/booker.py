@@ -956,6 +956,45 @@ _ROWS_RENDERED_JS = """
 """
 
 
+# 페이지 종합 상태 — 큐 팝업 vs 결과 vs 빈 상태 vs 차단 구분.
+# 'queue' = '서비스 연결 대기' 같은 큐 팝업 떠있음 → 인내심 있게 대기
+# 'ready' = 결과 행이 그려짐                       → 즉시 스캔
+# 'block' = -8003 / 매크로 차단                    → 회복 루틴
+# 'empty' = 위 셋 다 아님 (렌더링 중이거나 결과 0건) → 짧게 대기
+_PAGE_STATE_JS = """
+() => {
+  const body = document.body;
+  if (!body) return 'empty';
+  const txt = (body.innerText || '').slice(0, 8000);
+
+  // 차단 화면 감지 — 가장 우선.
+  if (
+    txt.includes('-8003') ||
+    txt.includes('매크로') ||
+    txt.includes('미허가 도구') ||
+    txt.includes('이용이 제한') ||
+    txt.includes('비정상적인 접근')
+  ) return 'block';
+
+  // 큐 팝업 감지 — 코레일은 매진 임박/오픈 직후 '서비스 연결 대기' 류 띄움.
+  if (
+    txt.includes('서비스 연결 대기') ||
+    txt.includes('연결 대기중') ||
+    txt.includes('잠시만 기다려') ||
+    txt.includes('대기 중입니다') ||
+    txt.includes('순서를 기다리고')
+  ) return 'queue';
+
+  // 결과 행이 그려졌는지 — 가격 또는 입석 라벨 보유한 <a> 탐색.
+  const links = document.querySelectorAll('a');
+  for (const a of links) {
+    if (a.querySelector('p.txt_ch, .tck_etc_use')) return 'ready';
+  }
+  return 'empty';
+}
+"""
+
+
 # F5 후 더보기 N회 클릭 — 더 넓은 시간대를 한 번에 스캔하기 위함.
 _LOAD_MORE_JS = """
 () => {
@@ -1086,22 +1125,57 @@ async def refresh_and_click_loop(
                 await asyncio.sleep(0.5)
             continue
 
-        # 2) 차단 페이지 검사 (JS 한 줄, 거의 즉시)
-        try:
-            blocked = await page.evaluate(_BLOCK_CHECK_JS)
-        except Exception:
-            blocked = False
-        if blocked:
+        # 2) 페이지 상태 머신 — block / queue / ready / empty 구분.
+        # 큐 팝업("서비스 연결 대기") 떠있을 땐 F5 안 하고 인내심 있게 대기.
+        # F5 하면 큐 끝으로 돌아가서 손해.
+        page_state = "empty"
+        state_started = asyncio.get_event_loop().time()
+        # 큐 상황을 한 번이라도 본 적 있으면 그때부터 인내심 모드 (최대 120초).
+        # 그렇지 않으면 빈 상태가 2.5초 이상 지속되면 그냥 진행.
+        seen_queue = False
+        last_queue_log = 0.0
+        while True:
+            try:
+                page_state = await page.evaluate(_PAGE_STATE_JS)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("hyper.state_check_failed", err=str(exc))
+                break
+
+            if page_state == "ready":
+                break
+            if page_state == "block":
+                break
+            elapsed = asyncio.get_event_loop().time() - state_started
+
+            if page_state == "queue":
+                seen_queue = True
+                # 큐 안에선 정말 인내심 — 최대 120초 (보통 30초 이내).
+                if elapsed > 120:
+                    log.warning("hyper.queue_too_long", elapsed=elapsed)
+                    break
+                # 30초마다 한 번씩 진행 알림.
+                now = asyncio.get_event_loop().time()
+                if now - last_queue_log > 30:
+                    log.info("hyper.in_queue", elapsed=int(elapsed))
+                    last_queue_log = now
+                await asyncio.sleep(0.4)
+                continue
+
+            # state == 'empty'
+            if seen_queue:
+                # 큐를 본 적 있으면 잠깐 더 기다림 (큐 → 빈 → ready 가능).
+                if elapsed > 5:
+                    break
+                await asyncio.sleep(0.2)
+                continue
+            # 큐를 본 적 없으면 2.5초만 대기 후 진행.
+            if elapsed > 2.5:
+                break
+            await asyncio.sleep(0.15)
+
+        if page_state == "block":
             await recover_from_block(page, marker="-8003/매크로", notify=notify, job_id=job.id)
             continue
-
-        # 2.5) Vue/React 가 열차 행을 실제로 그릴 때까지 대기. 보통 100~500ms.
-        # 안 그러면 "행 없음 = 다 매진" 으로 잘못 판단해서 좌석을 놓침.
-        try:
-            await page.wait_for_function(_ROWS_RENDERED_JS, timeout=2500)
-        except Exception:
-            # 2.5초 안에 안 뜨면 그냥 진행 (아예 결과 없는 경우 등)
-            pass
 
         # 2.7) 더보기 N회 펼치기 (사용자 옵션) — 각 클릭 후 새 행이 그려질 때까지 대기.
         for _ in range(expand_count):

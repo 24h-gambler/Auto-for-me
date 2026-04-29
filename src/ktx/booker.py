@@ -931,18 +931,18 @@ _RESERVE_BTN_JS = """
 
 # 예매 버튼 클릭 직후 코레일이 띄우는 통신 오류 팝업 감지.
 # 이게 뜨면 예약은 안 된 상태 — 팝업 닫고 다음 F5 사이클로.
+# (legacy — 지금은 _POST_RESERVE_STATE_JS 가 대신 사용. 혹시 모를 fallback.)
 _RESERVE_ERROR_JS = """
 () => {
-  const txt = ((document.body && document.body.innerText) || '').slice(0, 8000);
+  const raw = ((document.body && document.body.innerText) || '').slice(0, 8000);
+  const t = raw.replace(/\\s+/g, '');
   if (
-    txt.includes('통신 중 오류') ||
-    txt.includes('통신중 오류') ||
-    txt.includes('오류가 발생') ||
-    txt.includes('잠시 후 다시') ||
-    txt.includes('시스템 오류') ||
-    txt.includes('처리 중 오류') ||
-    txt.includes('서비스 처리 중 오류') ||
-    txt.includes('일시적인 오류')
+    t.includes('통신중오류') ||
+    t.includes('오류가발생') ||
+    t.includes('잠시후다시') ||
+    t.includes('시스템오류') ||
+    t.includes('처리중오류') ||
+    t.includes('일시적인오류')
   ) return true;
   return false;
 }
@@ -980,34 +980,31 @@ _DISMISS_ERROR_JS = """
 #   unknown       : 명확한 신호 없음 (일시 전환 중 가능성) → 짧게 재확인.
 _POST_RESERVE_STATE_JS = """
 () => {
-  const txt = ((document.body && document.body.innerText) || '').slice(0, 8000);
+  const raw = ((document.body && document.body.innerText) || '').slice(0, 8000);
+  const t = raw.replace(/\\s+/g, '');   // 공백 다 지운 비교용
 
   // 1) 환불(반환) 위약금 안내 = 예매 진행 정상의 강력한 신호.
-  //    이게 뜨지 않으면 절대 '잡혔다' 알림 보내지 말 것.
   if (
-    txt.includes('환불(반환) 위약금') ||
-    txt.includes('환불(반환)위약금') ||
-    txt.includes('환불 위약금 안내') ||
-    (txt.includes('환불') && txt.includes('위약금') && txt.includes('출발'))
+    t.includes('환불(반환)위약금') ||
+    t.includes('환불위약금안내') ||
+    (t.includes('환불') && t.includes('위약금') && t.includes('출발'))
   ) return 'refund_policy';
 
-  // 2) 통신 / 시스템 오류 — 다양한 표현 매칭.
+  // 2) 통신 / 시스템 오류.
   if (
-    txt.includes('통신 중 오류') ||
-    txt.includes('통신중 오류') ||
-    txt.includes('오류가 발생') ||
-    txt.includes('잠시 후 다시') ||
-    txt.includes('시스템 오류') ||
-    txt.includes('처리 중 오류') ||
-    txt.includes('서비스 처리 중 오류') ||
-    txt.includes('일시적인 오류')
+    t.includes('통신중오류') ||
+    t.includes('오류가발생') ||
+    t.includes('잠시후다시') ||
+    t.includes('시스템오류') ||
+    t.includes('처리중오류') ||
+    t.includes('일시적인오류')
   ) return 'error';
 
   // 3) 이미 다른 사람이 / 매진 — race 패배.
   if (
-    (txt.includes('이미') && (txt.includes('다른') || txt.includes('예약'))) ||
-    txt.includes('매진되었')  ||
-    txt.includes('남아있지 않')
+    (t.includes('이미') && (t.includes('다른') || t.includes('예약'))) ||
+    t.includes('매진되었') ||
+    t.includes('남아있지않')
   ) return 'taken';
 
   return 'unknown';
@@ -1034,13 +1031,14 @@ _REFUND_POLICY_OK_JS = """
 
 _BLOCK_CHECK_JS = """
 () => {
-  const t = (document.body && document.body.innerText) || '';
+  const raw = (document.body && document.body.innerText) || '';
+  const t = raw.replace(/\\s+/g, '');
   return (
     t.includes('-8003') ||
     t.includes('매크로') ||
-    t.includes('미허가 도구') ||
-    t.includes('이용이 제한') ||
-    t.includes('비정상적인 접근')
+    t.includes('미허가도구') ||
+    t.includes('이용이제한') ||
+    t.includes('비정상적인접근')
   );
 }
 """
@@ -1060,35 +1058,39 @@ _ROWS_RENDERED_JS = """
 
 
 # 페이지 종합 상태 — 큐 팝업 vs 결과 vs 빈 상태 vs 차단 구분.
-# 'queue' = '서비스 연결 대기' 같은 큐 팝업 떠있음 → 인내심 있게 대기
-# 'ready' = 결과 행이 그려짐                       → 즉시 스캔
-# 'block' = -8003 / 매크로 차단                    → 회복 루틴
-# 'empty' = 위 셋 다 아님 (렌더링 중이거나 결과 0건) → 짧게 대기
+# 'queue' = '서비스 연결대기중입니다' 같은 큐 팝업 떠있음 → 인내심 있게 대기
+# 'ready' = 결과 행이 그려짐                              → 즉시 스캔
+# 'block' = -8003 / 매크로 차단                           → 회복 루틴
+# 'empty' = 위 셋 다 아님                                 → 짧게 대기
+#
+# 핵심: 한국어 텍스트의 띄어쓰기가 변동적이라 (예: "서비스 연결대기중입니다"
+# vs "서비스 연결 대기 중입니다"), 모든 공백을 제거한 compactTxt 에서 매칭.
 _PAGE_STATE_JS = """
 () => {
   const body = document.body;
   if (!body) return 'empty';
-  const txt = (body.innerText || '').slice(0, 8000);
+  const rawTxt = (body.innerText || '').slice(0, 8000);
+  const compactTxt = rawTxt.replace(/\\s+/g, '');
 
-  // 차단 화면 감지 — 가장 우선.
+  // 1) 차단 화면 — 가장 우선.
   if (
-    txt.includes('-8003') ||
-    txt.includes('매크로') ||
-    txt.includes('미허가 도구') ||
-    txt.includes('이용이 제한') ||
-    txt.includes('비정상적인 접근')
+    compactTxt.includes('-8003') ||
+    compactTxt.includes('매크로') ||
+    compactTxt.includes('미허가도구') ||
+    compactTxt.includes('이용이제한') ||
+    compactTxt.includes('비정상적인접근')
   ) return 'block';
 
-  // 큐 팝업 감지 — 코레일은 매진 임박/오픈 직후 '서비스 연결 대기' 류 띄움.
+  // 2) 큐 팝업 — '서비스 연결대기중입니다' 등.
   if (
-    txt.includes('서비스 연결 대기') ||
-    txt.includes('연결 대기중') ||
-    txt.includes('잠시만 기다려') ||
-    txt.includes('대기 중입니다') ||
-    txt.includes('순서를 기다리고')
+    compactTxt.includes('연결대기') ||
+    compactTxt.includes('대기중입니다') ||
+    compactTxt.includes('잠시만기다려') ||
+    compactTxt.includes('순서를기다리') ||
+    compactTxt.includes('처리중입니다') && compactTxt.includes('대기')
   ) return 'queue';
 
-  // 결과 행이 그려졌는지 — 가격 또는 입석 라벨 보유한 <a> 탐색.
+  // 3) 결과 행이 그려졌는지.
   const links = document.querySelectorAll('a');
   for (const a of links) {
     if (a.querySelector('p.txt_ch, .tck_etc_use')) return 'ready';
@@ -1344,10 +1346,16 @@ async def refresh_and_click_loop(
                 log.warning("load_more.click_failed", iter=i, err=str(exc))
                 break
 
-            # 새 행이 추가될 때까지 대기 (최대 5초). 도중에 큐 뜨면 큐 풀릴 때까지.
-            sub_started = asyncio.get_event_loop().time()
+            # 새 행이 추가될 때까지 대기.
+            # 두 개의 타이머를 분리:
+            #   queue_total      : 큐 안에서 기다린 누적 시간 (최대 120초)
+            #   non_queue_elapsed: 큐 아닌 상태에서 새 행 안 늘어난 시간 (최대 5초)
+            # 큐 대기는 인내심 있게, 새 행 대기는 짧게.
             new_rows = False
-            while asyncio.get_event_loop().time() - sub_started < 5.0:
+            queue_total = 0.0
+            non_queue_start = asyncio.get_event_loop().time()
+            last_queue_log = 0.0
+            while True:
                 try:
                     sub_state = await page.evaluate(_PAGE_STATE_JS)
                 except Exception:
@@ -1359,15 +1367,29 @@ async def refresh_and_click_loop(
 
                 if sub_state == "queue":
                     seen_queue = True
-                    await asyncio.sleep(0.4)
+                    if queue_total > 120:
+                        log.warning("load_more.queue_too_long", iter=i)
+                        break
+                    if queue_total - last_queue_log > 15:
+                        log.info("load_more.in_queue", iter=i, sec=int(queue_total))
+                        last_queue_log = queue_total
+                    await asyncio.sleep(0.5)
+                    queue_total += 0.5
+                    # 큐를 빠져나오면 non-queue 타이머는 새로 시작.
+                    non_queue_start = asyncio.get_event_loop().time()
                     continue
 
+                # ready / empty 상태에서만 행 개수 비교.
                 try:
                     rows_now = await page.evaluate(_COUNT_ROWS_JS)
                 except Exception:
                     rows_now = rows_before
                 if rows_now > rows_before:
                     new_rows = True
+                    break
+
+                # 큐 아닌데 5초 이상 새 행 안 늘어나면 포기.
+                if asyncio.get_event_loop().time() - non_queue_start > 5:
                     break
                 await asyncio.sleep(0.2)
 

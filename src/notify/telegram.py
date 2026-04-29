@@ -14,6 +14,9 @@ Responsibilities
 from __future__ import annotations
 
 import asyncio
+import shlex
+import subprocess
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -66,6 +69,8 @@ class TelegramService:
         self.app.add_handler(CommandHandler("watch", self.cmd_watch))
         self.app.add_handler(CommandHandler("unwatch", self.cmd_unwatch))
         self.app.add_handler(CommandHandler("watches", self.cmd_watches))
+        self.app.add_handler(CommandHandler("shutdown", self.cmd_shutdown))
+        self.app.add_handler(CommandHandler("reboot", self.cmd_reboot))
         self.app.add_handler(CallbackQueryHandler(self.cb_refresh, pattern="^rf:"))
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_text))
 
@@ -129,6 +134,8 @@ class TelegramService:
             "  /jobs        진행/완료 작업 목록\n"
             "  /cancel <id> 작업 취소\n"
             "  /captcha <code>  봇이 요청하면 캡차 입력\n"
+            "  /shutdown [N]    PC N초 뒤 종료 (기본 60)\n"
+            "  /reboot   [N]    PC N초 뒤 재시작 (기본 30)\n"
             "\n"
             "🛒 쿠팡 (Anthropic API 키 필요)\n"
             "  /coupang 무선마우스 50000 사무용\n"
@@ -416,6 +423,56 @@ class TelegramService:
                 f"[{w['id']}] {q['origin']}→{q['destination']} {q['date']} {q['time']} ±{q['window_minutes']}m"
             )
         await update.message.reply_text("\n".join(lines))
+
+    # ---- Remote PC control (외출 시 핸드폰으로 PC 끄기) -----------------
+    async def cmd_shutdown(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """/shutdown — PC 전원 끄기 (Windows/macOS/Linux)."""
+        if not _is_authorized(update.effective_chat.id):
+            return
+        delay = 60
+        if ctx.args:
+            try:
+                delay = int(ctx.args[0])
+            except ValueError:
+                pass
+        await update.message.reply_text(
+            f"🛑 {delay}초 뒤 PC 종료. 취소하려면 OS 별 cancel 명령:\n"
+            f"  Windows: shutdown /a\n"
+            f"  macOS:   sudo killall shutdown"
+        )
+        try:
+            if sys.platform.startswith("win"):
+                subprocess.Popen(["shutdown", "/s", "/t", str(delay)])
+            elif sys.platform == "darwin":
+                # macOS: needs sudoers entry. mins must be >= 1.
+                mins = max(1, delay // 60)
+                subprocess.Popen(["sudo", "shutdown", "-h", f"+{mins}"])
+            else:
+                subprocess.Popen(["shutdown", "-h", f"+{max(1, delay // 60)}"])
+        except Exception as exc:  # noqa: BLE001
+            await update.message.reply_text(f"⚠️ 종료 명령 실패: {exc}")
+
+    async def cmd_reboot(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """/reboot — PC 재시작."""
+        if not _is_authorized(update.effective_chat.id):
+            return
+        delay = 30
+        if ctx.args:
+            try:
+                delay = int(ctx.args[0])
+            except ValueError:
+                pass
+        await update.message.reply_text(f"🔁 {delay}초 뒤 PC 재시작.")
+        try:
+            if sys.platform.startswith("win"):
+                subprocess.Popen(["shutdown", "/r", "/t", str(delay)])
+            elif sys.platform == "darwin":
+                mins = max(1, delay // 60)
+                subprocess.Popen(["sudo", "shutdown", "-r", f"+{mins}"])
+            else:
+                subprocess.Popen(["shutdown", "-r", f"+{max(1, delay // 60)}"])
+        except Exception as exc:  # noqa: BLE001
+            await update.message.reply_text(f"⚠️ 재시작 명령 실패: {exc}")
 
     # ---- Lifecycle -------------------------------------------------------
     async def run(self) -> None:

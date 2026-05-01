@@ -71,6 +71,11 @@ class TelegramService:
         self.app.add_handler(CommandHandler("watches", self.cmd_watches))
         self.app.add_handler(CommandHandler("shutdown", self.cmd_shutdown))
         self.app.add_handler(CommandHandler("reboot", self.cmd_reboot))
+        # 짧은 별칭 — 핸드폰에서 빠르게 칠 수 있게.
+        self.app.add_handler(CommandHandler("go", self.cmd_refresh))     # /refresh 와 동일
+        self.app.add_handler(CommandHandler("off", self.cmd_shutdown))   # /shutdown 과 동일
+        self.app.add_handler(CommandHandler("stop", self.cmd_stop))      # 모든 작업 취소
+        self.app.add_handler(CommandHandler("status", self.cmd_jobs))    # /jobs 와 동일
         self.app.add_handler(CallbackQueryHandler(self.cb_refresh, pattern="^rf:"))
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_text))
 
@@ -106,19 +111,28 @@ class TelegramService:
 
     async def cmd_help(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(
-            "⚡ HYPER 새로고침 모드 (진짜 Chrome + CDP)\n"
-            "  사전: scripts\\launch_chrome.ps1 으로 진짜 Chrome 띄움\n"
-            "  /refresh             ← 인라인 버튼 메뉴\n"
-            "                          [⚡ 기본] [🔍📜📚 +더보기 1/2/3]\n"
-            "                          [🙏 간절합니다 / +1 / +2 / +3]\n"
-            "                          [🐢 일반 속도]\n"
-            "  /refresh 1           ← 더보기 1회 (좌석만 + 초고속, 기본값)\n"
-            "  /refresh 간절 2      ← 입석+좌석 + 더보기 2회\n"
-            "  /refresh 보통        ← 일반 속도\n"
-            "  ※ 기본 = 초고속(≈0.5초) + 좌석만, 더보기 최대 3\n"
-            "  ※ 진행 알림은 5분마다, 잡히는 즉시 별도 알림\n"
+            "🚄 자주 쓰는 명령 (짧은 별칭)\n"
+            "  /go        ← 예매 시작 (메뉴 띄움)\n"
+            "  /status    ← 진행 상황 보기\n"
+            "  /stop      ← 모든 작업 즉시 취소\n"
+            "  /off       ← PC 종료 (60초 뒤)\n"
             "\n"
-            "  → 잡히면: 셀 클릭 + 예매 버튼 단일 JS 호출로 따닥 → 알림\n"
+            "🚄 자세한 명령\n"
+            "  /refresh             ← /go 와 동일, 메뉴\n"
+            "  /refresh 1           ← 더보기 1회 (좌석만, 초고속, 기본값)\n"
+            "  /refresh 간절 2      ← 입석+좌석 + 더보기 2\n"
+            "  /jobs                ← 작업 목록 (= /status)\n"
+            "  /cancel <id>         ← 특정 작업만 취소\n"
+            "  /shutdown [N]        ← N초 뒤 PC 종료\n"
+            "  /reboot   [N]        ← N초 뒤 PC 재시작\n"
+            "\n"
+            "  ※ /go 메뉴 버튼:\n"
+            "    [⚡ 기본]  [🔍 +1]  [📜 +2]  [📚 +3]\n"
+            "    [🙏 간절합니다 / +1 / +2 / +3]\n"
+            "    [🐢 일반 속도]\n"
+            "  ※ 기본 = 초고속(≈0.5초) + 좌석만\n"
+            "  ※ 진행 알림은 15분마다, 잡히는 즉시 별도 알림\n"
+            "\n"
             "\n"
             "🚄 자동 모드 (봇이 처음부터 다 함, 탐지 위험)\n"
             "  /book 서울 부산 2026-05-10 09:00 120     ← 빠른 자동 폴링\n"
@@ -160,10 +174,26 @@ class TelegramService:
         if not _is_authorized(update.effective_chat.id):
             return
         if not ctx.args:
-            await update.message.reply_text("사용법: /cancel <job_id>")
+            await update.message.reply_text("사용법: /cancel <job_id>\n모든 작업 취소: /stop")
             return
         ok = self.manager.cancel(ctx.args[0])
         await update.message.reply_text("취소됨." if ok else "해당 작업 없음 또는 이미 종료.")
+
+    async def cmd_stop(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """/stop — 진행 중 / 큐 대기 중 모든 작업 일괄 취소."""
+        if not _is_authorized(update.effective_chat.id):
+            return
+        cancelled = []
+        for j in list(self.manager.jobs.values()):
+            if j.status in ("queued", "running"):
+                if self.manager.cancel(j.id):
+                    cancelled.append(j.id)
+        if cancelled:
+            await update.message.reply_text(
+                f"⏹️ {len(cancelled)}개 작업 취소됨: {', '.join(cancelled)}"
+            )
+        else:
+            await update.message.reply_text("진행 중 작업 없음.")
 
     async def cmd_captcha(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not _is_authorized(update.effective_chat.id):

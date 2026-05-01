@@ -16,7 +16,7 @@ if (-not (Test-Path $Py)) {
   Write-Error "Python venv not found at $Py. Create it first: python -m venv .venv"
 }
 
-# 공통 Settings — 무한 재시도 + 배터리 OK + 부팅 직후 시작.
+# Common settings: infinite restart, OK on battery, start at boot.
 $Settings = New-ScheduledTaskSettingsSet `
   -AllowStartIfOnBatteries `
   -DontStopIfGoingOnBatteries `
@@ -24,7 +24,7 @@ $Settings = New-ScheduledTaskSettingsSet `
   -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) `
   -ExecutionTimeLimit ([TimeSpan]::Zero)
 
-# 1) Chrome 자동 시작 — 로그온 즉시.
+# 1) Chrome auto-start at logon.
 $ChromeAction = New-ScheduledTaskAction `
   -Execute "PowerShell" `
   -Argument "-ExecutionPolicy Bypass -File `"$Root\scripts\launch_chrome.ps1`"" `
@@ -32,17 +32,17 @@ $ChromeAction = New-ScheduledTaskAction `
 $ChromeTrigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 Register-ScheduledTask `
   -TaskName "AutoForMe-Chrome" `
-  -Description "Auto-for-me — launch Chrome with debugging port at logon" `
+  -Description "Auto-for-me - launch Chrome with debugging port at logon" `
   -Action $ChromeAction -Trigger $ChromeTrigger -Settings $Settings -Force | Out-Null
 
-# 2) 봇 자동 시작 — 로그온 30초 후 (Chrome 이 먼저 뜰 시간).
+# 2) Bot auto-start - 30s delay so Chrome boots first.
 $BotAction = New-ScheduledTaskAction `
   -Execute $Py -Argument "-m src.main" -WorkingDirectory $Root
 $BotTrigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 $BotTrigger.Delay = "PT30S"
 Register-ScheduledTask `
   -TaskName "AutoForMe-Bot" `
-  -Description "Auto-for-me bot — runs the Telegram + Playwright agent at logon" `
+  -Description "Auto-for-me bot - runs the Telegram + Playwright agent at logon" `
   -Action $BotAction -Trigger $BotTrigger -Settings $Settings -Force | Out-Null
 
 Write-Host "Registered: AutoForMe-Chrome + AutoForMe-Bot (run at logon)."

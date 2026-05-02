@@ -990,14 +990,17 @@ _POST_RESERVE_STATE_JS = """
     (t.includes('환불') && t.includes('위약금') && t.includes('출발'))
   ) return 'refund_policy';
 
-  // 2) 통신 / 시스템 오류.
+  // 2) 통신 / 시스템 오류 — '통신에러 발생' 같은 전체 페이지 오류 포함.
   if (
+    t.includes('통신에러') ||
+    t.includes('통신오류') ||
     t.includes('통신중오류') ||
     t.includes('오류가발생') ||
     t.includes('잠시후다시') ||
     t.includes('시스템오류') ||
     t.includes('처리중오류') ||
-    t.includes('일시적인오류')
+    t.includes('일시적인오류') ||
+    t.includes('서비스를이용할수없')
   ) return 'error';
 
   // 3) 이미 다른 사람이 / 매진 — race 패배.
@@ -1057,14 +1060,14 @@ _ROWS_RENDERED_JS = """
 """
 
 
-# 페이지 종합 상태 — 큐 팝업 vs 결과 vs 빈 상태 vs 차단 구분.
-# 'queue' = '서비스 연결대기중입니다' 같은 큐 팝업 떠있음 → 인내심 있게 대기
-# 'ready' = 결과 행이 그려짐                              → 즉시 스캔
-# 'block' = -8003 / 매크로 차단                           → 회복 루틴
-# 'empty' = 위 셋 다 아님                                 → 짧게 대기
+# 페이지 종합 상태 — 큐 팝업 vs 결과 vs 빈 상태 vs 차단 vs 일시 통신 오류 구분.
+# 'queue'           = '서비스 연결대기중입니다' 같은 큐 팝업 떠있음 → 인내심 있게 대기
+# 'ready'           = 결과 행이 그려짐                              → 즉시 스캔
+# 'block'           = -8003 / 매크로 차단 (영구적)                  → 30초+ 휴식
+# 'transient_error' = '통신에러 발생' 같은 일시 오류 (F5 로 회복)    → 빠른 hard reload
+# 'empty'           = 위 다 아님                                    → 짧게 대기
 #
-# 핵심: 한국어 텍스트의 띄어쓰기가 변동적이라 (예: "서비스 연결대기중입니다"
-# vs "서비스 연결 대기 중입니다"), 모든 공백을 제거한 compactTxt 에서 매칭.
+# 핵심: 한국어 띄어쓰기 변동에 강건하도록 모든 공백 제거 후 매칭.
 _PAGE_STATE_JS = """
 () => {
   const body = document.body;
@@ -1072,7 +1075,7 @@ _PAGE_STATE_JS = """
   const rawTxt = (body.innerText || '').slice(0, 8000);
   const compactTxt = rawTxt.replace(/\\s+/g, '');
 
-  // 1) 차단 화면 — 가장 우선.
+  // 1) 영구 차단 — 매크로 의심, 가장 우선.
   if (
     compactTxt.includes('-8003') ||
     compactTxt.includes('매크로') ||
@@ -1081,21 +1084,58 @@ _PAGE_STATE_JS = """
     compactTxt.includes('비정상적인접근')
   ) return 'block';
 
-  // 2) 큐 팝업 — '서비스 연결대기중입니다' 등.
+  // 2) 일시 통신 오류 — F5 로 회복 가능, '통신에러 발생' / '오류가 발생' 등.
+  //    block 보다 후순위로 검사 (영구 차단 키워드가 우선).
+  if (
+    compactTxt.includes('통신에러') ||
+    compactTxt.includes('통신오류') ||
+    compactTxt.includes('통신중오류') ||
+    (compactTxt.includes('오류가발생') && !compactTxt.includes('환불')) ||
+    compactTxt.includes('일시적인오류') ||
+    compactTxt.includes('서비스를이용할수없') ||
+    (compactTxt.includes('잠시후') && compactTxt.includes('다시'))
+  ) return 'transient_error';
+
+  // 3) 큐 팝업 — '서비스 연결대기중입니다' 등.
   if (
     compactTxt.includes('연결대기') ||
     compactTxt.includes('대기중입니다') ||
     compactTxt.includes('잠시만기다려') ||
     compactTxt.includes('순서를기다리') ||
-    compactTxt.includes('처리중입니다') && compactTxt.includes('대기')
+    (compactTxt.includes('처리중입니다') && compactTxt.includes('대기'))
   ) return 'queue';
 
-  // 3) 결과 행이 그려졌는지.
+  // 4) 결과 행이 그려졌는지.
   const links = document.querySelectorAll('a');
   for (const a of links) {
     if (a.querySelector('p.txt_ch, .tck_etc_use')) return 'ready';
   }
   return 'empty';
+}
+"""
+
+
+# 통신에러 페이지의 '재시도' / '다시 시도' / '확인' 버튼 클릭 (사람이 누르듯).
+_RETRY_ERROR_PAGE_JS = """
+() => {
+  const isVisible = (el) => {
+    if (!el || el.disabled) return false;
+    if (el.offsetParent === null) return false;
+    const r = el.getBoundingClientRect();
+    return r.width > 0 && r.height > 0;
+  };
+  const candidates = ['재시도', '다시시도', '다시 시도', '재접속', '새로고침', '확인'];
+  for (const el of document.querySelectorAll('button, a')) {
+    if (!isVisible(el)) continue;
+    const t = (el.innerText || '').trim().replace(/\\s+/g, '');
+    for (const c of candidates) {
+      if (t === c.replace(/\\s+/g, '')) {
+        el.click();
+        return c;
+      }
+    }
+  }
+  return null;
 }
 """
 
@@ -1286,6 +1326,28 @@ async def refresh_and_click_loop(
                 break
             if page_state == "block":
                 break
+            if page_state == "transient_error":
+                # 일시 통신 오류 — F5 한 번이면 회복. 사람처럼:
+                #   1) 페이지의 '재시도/확인' 버튼 보이면 클릭
+                #   2) 없으면 hard reload
+                # 회복 카운터엔 안 들어감 (정상 일시 오류).
+                log.info("hyper.transient_error_page")
+                btn = None
+                try:
+                    btn = await page.evaluate(_RETRY_ERROR_PAGE_JS)
+                except Exception:
+                    pass
+                if btn:
+                    log.info("hyper.error_page_button_clicked", btn=btn)
+                    await asyncio.sleep(random.uniform(0.5, 1.0))
+                else:
+                    # hard reload 로 페이지 캐시 우회.
+                    await _hard_refresh(page)
+                    last_cache_flush = asyncio.get_event_loop().time()
+                # state machine 처음부터 다시.
+                state_started = asyncio.get_event_loop().time()
+                seen_queue = False
+                continue
             elapsed = asyncio.get_event_loop().time() - state_started
 
             if page_state == "queue":
